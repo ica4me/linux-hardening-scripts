@@ -1,12 +1,80 @@
-# Linux Hardening Scripts — DBalance Multi-OS
+# Linux Hardening Scripts — Multi-OS
 
-Repository ini berisi kumpulan script hardening Linux untuk kebutuhan server DBalance.  
+Repository ini berisi kumpulan script hardening Linux yang dapat digunakan secara umum oleh siapa saja untuk meningkatkan baseline keamanan server Linux.
+
+Script **tidak khusus untuk DBalance**. Script dapat digunakan pada server aplikasi, web server, middleware, database server, monitoring server, utility server, VM cloud, maupun server Linux lain selama sistem operasinya termasuk dalam daftar yang didukung.
+
 Setiap kontrol hardening terdiri dari dua script:
 
 - **Apply** — menerapkan konfigurasi hardening.
 - **Verifikasi** — melakukan pengecekan read-only terhadap hasil konfigurasi.
 
-## OS yang Didukung
+---
+
+# ⚠️ PERINGATAN PENTING SEBELUM MENJALANKAN SCRIPT
+
+## SSH Password Login akan dinonaktifkan secara default
+
+Script **SSH & Session Timeout** pada kontrol nomor 3 secara default menerapkan:
+
+```text
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+KbdInteractiveAuthentication no
+```
+
+Artinya setelah konfigurasi diterapkan:
+
+- login SSH menggunakan **password akan dinonaktifkan**;
+- login SSH harus menggunakan **SSH key / public key authentication**;
+- root hanya dapat login menggunakan SSH key;
+- root tidak dapat login menggunakan password.
+
+**PASTIKAN SSH key / public key authentication sudah berhasil digunakan sebelum menjalankan script nomor 3.**
+
+Lakukan pengujian dari terminal/session baru terlebih dahulu:
+
+```bash
+ssh user@IP_SERVER
+```
+
+Pastikan login menggunakan key berhasil **sebelum menutup session SSH yang sedang aktif**.
+
+Jika Anda masih ingin mempertahankan:
+
+```text
+PasswordAuthentication yes
+```
+
+maka **jangan menjalankan script nomor 3 apa adanya**, karena apply script akan mengubah nilainya menjadi `no`.
+
+Sesuaikan policy SSH pada script terlebih dahulu, lalu pastikan konfigurasi yang efektif di salah satu atau beberapa file berikut sesuai kebutuhan:
+
+```text
+/etc/ssh/sshd_config
+/etc/ssh/sshd_config.d/*.conf
+```
+
+Contoh jika memang ingin tetap menggunakan password login:
+
+```text
+PasswordAuthentication yes
+```
+
+Setelah perubahan SSH, selalu validasi:
+
+```bash
+sshd -t
+sshd -T | grep -Ei 'passwordauthentication|permitrootlogin|kbdinteractiveauthentication'
+```
+
+Kemudian lakukan **duplicate SSH login test** sebelum menutup session lama.
+
+> Untuk server production, sangat disarankan mempunyai akses console, KVM, serial console, cloud console, atau mekanisme recovery lain sebelum mengubah konfigurasi PAM dan SSH.
+
+---
+
+# OS yang Didukung
 
 Script dirancang untuk digunakan pada:
 
@@ -16,7 +84,9 @@ Script dirancang untuk digunakan pada:
 | Debian | 12, 13 |
 | Red Hat Enterprise Linux | 9.x, 10.x termasuk RHEL 10.2 |
 
-> Jalankan seluruh script menggunakan user yang mempunyai hak `sudo` atau sebagai `root`.
+Script mendeteksi distribusi dan versi OS sebelum menerapkan konfigurasi.
+
+Jalankan menggunakan user dengan hak `sudo` atau sebagai `root`.
 
 ---
 
@@ -24,7 +94,7 @@ Script dirancang untuk digunakan pada:
 
 ## Fungsi
 
-Menerapkan kebijakan password, meliputi:
+Menerapkan baseline kebijakan password:
 
 - Minimum panjang password: **12 karakter**
 - Minimal **1 huruf besar**
@@ -33,7 +103,9 @@ Menerapkan kebijakan password, meliputi:
 - Simbol tidak diwajibkan
 - Password history: **5 password terakhir**
 - Default repository saat ini: password **tidak expired**
-- Temporary login ban menggunakan `pam_faillock`
+- Integrasi `pam_pwquality`
+- Integrasi `pam_pwhistory`
+- Dukungan `pam_faillock`
 
 ### Menjalankan Apply + Verifikasi
 
@@ -42,31 +114,33 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/p
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/password_policy_verifikasi_multios.sh | sudo bash
 ```
 
-## Jika ingin menerapkan Password Expiry 90 hari
+## Mengubah Password Expiry menjadi 90 hari
 
 Default script saat ini menggunakan:
 
-```bash
+```text
 PASS_MAX_DAYS   -1
 PASS_MIN_DAYS   0
 PASS_WARN_AGE   -1
 ```
 
-dan user existing diproses menggunakan:
+dan existing interactive user diproses dengan:
 
 ```bash
-chage -M -1 -m 0 -W -1 USERNAME
+chage -M -1 -m 0 -W -1 "${username}"
 ```
 
-Artinya password tidak pernah expired.
+Artinya password **tidak pernah expired**.
 
-Jika kebijakan yang diinginkan adalah:
+Jika organisasi membutuhkan:
 
-- Maximum password age: **90 hari**
-- Minimum password age: **1 hari**
-- Warning sebelum expired: **7 hari**
+```text
+Password Expiry : 90 days
+Minimum Age     : 1 day
+Warning         : 7 days
+```
 
-ubah bagian pada `password_policy_apply_multios.sh` menjadi:
+ubah bagian berikut di `password_policy_apply_multios.sh`:
 
 ```bash
 set_space_value "${LOGIN_DEFS}" "PASS_MAX_DAYS" "90"
@@ -74,22 +148,22 @@ set_space_value "${LOGIN_DEFS}" "PASS_MIN_DAYS" "1"
 set_space_value "${LOGIN_DEFS}" "PASS_WARN_AGE" "7"
 ```
 
-dan ubah bagian `chage` untuk existing interactive users menjadi:
+Kemudian ubah pengaturan existing interactive user menjadi:
 
 ```bash
 chage -M 90 -m 1 -W 7 "${username}"
 ```
 
-Jika ingin masa berlaku password **lebih cepat dari 90 hari**, cukup ganti nilai `90`. Contoh 60 hari:
+Untuk expiry lebih cepat, misalnya 60 hari:
 
 ```bash
 set_space_value "${LOGIN_DEFS}" "PASS_MAX_DAYS" "60"
 chage -M 60 -m 1 -W 7 "${username}"
 ```
 
-Verifier juga harus disesuaikan agar mengecek nilai expiry yang sama.
+Verifier juga harus disesuaikan agar memeriksa nilai expiry yang sama.
 
-> Catatan: script Password Policy juga memiliki konfigurasi `pam_faillock`. Untuk pengelolaan lockout yang lebih jelas dan terpisah, gunakan kontrol nomor 2 sebagai referensi utama Account Lockout.
+> Catatan: kontrol Password Policy dan Account Lockout dipisahkan agar lebih mudah diaudit. Untuk lockout policy gunakan kontrol nomor 2 sebagai referensi utama.
 
 ---
 
@@ -97,14 +171,14 @@ Verifier juga harus disesuaikan agar mengecek nilai expiry yang sama.
 
 ## Fungsi
 
-Melindungi akun dari brute-force login menggunakan `pam_faillock`.
+Melindungi akun dari brute-force authentication menggunakan `pam_faillock`.
 
 Default repository saat ini:
 
 ```text
-5 failed attempts
-Failure observation window: 900 seconds
-Temporary ban: 600 seconds / 10 minutes
+Failure threshold          : 5 kali gagal
+Failure observation window : 900 detik / 15 menit
+Temporary ban              : 600 detik / 10 menit
 ```
 
 Setelah 10 menit akun dapat digunakan kembali secara otomatis.
@@ -116,9 +190,9 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/a
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/account_lockout_verify_multios.sh | sudo bash
 ```
 
-## Jika ingin Account Lockout 3 kali gagal
+## Mengubah Account Lockout menjadi 3 kali gagal
 
-Pada `account_lockout_apply_multios.sh`, default-nya:
+Default pada `account_lockout_apply_multios.sh`:
 
 ```bash
 LOCKOUT_DENY="${LOCKOUT_DENY:-5}"
@@ -126,33 +200,29 @@ FAIL_INTERVAL="${FAIL_INTERVAL:-900}"
 UNLOCK_TIME="${UNLOCK_TIME:-600}"
 ```
 
-Untuk menjadikan threshold **3 kali gagal**, ubah menjadi:
-
-```bash
-LOCKOUT_DENY="${LOCKOUT_DENY:-3}"
-```
-
-atau tanpa mengubah file:
-
-```bash
-LOCKOUT_DENY=3 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/account_lockout_apply_multios.sh | sudo -E bash
-```
-
-Untuk kebijakan:
+Jika ingin:
 
 ```text
 3 kali gagal
 ban 10 menit
 ```
 
-gunakan:
+ubah menjadi:
 
 ```bash
-LOCKOUT_DENY=3
-UNLOCK_TIME=600
+LOCKOUT_DENY="${LOCKOUT_DENY:-3}"
+FAIL_INTERVAL="${FAIL_INTERVAL:-900}"
+UNLOCK_TIME="${UNLOCK_TIME:-600}"
 ```
 
-Untuk kebijakan lama:
+Atau jalankan tanpa mengubah file:
+
+```bash
+curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/account_lockout_apply_multios.sh \
+  | sudo env LOCKOUT_DENY=3 FAIL_INTERVAL=900 UNLOCK_TIME=600 bash
+```
+
+Untuk kebijakan:
 
 ```text
 3 kali gagal
@@ -162,11 +232,16 @@ ban 30 menit
 gunakan:
 
 ```bash
-LOCKOUT_DENY=3
-UNLOCK_TIME=1800
+curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/account_lockout_apply_multios.sh \
+  | sudo env LOCKOUT_DENY=3 FAIL_INTERVAL=900 UNLOCK_TIME=1800 bash
 ```
 
-Verifier harus menggunakan threshold dan durasi yang sama.
+Jalankan verifier dengan nilai yang sama:
+
+```bash
+curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/account_lockout_verify_multios.sh \
+  | sudo env LOCKOUT_DENY=3 FAIL_INTERVAL=900 UNLOCK_TIME=600 bash
+```
 
 ---
 
@@ -174,9 +249,9 @@ Verifier harus menggunakan threshold dan durasi yang sama.
 
 ## Fungsi
 
-Mengamankan konfigurasi SSH dan idle interactive shell.
+Mengamankan konfigurasi SSH serta idle timeout untuk interactive shell.
 
-Policy:
+Default policy:
 
 ```text
 PasswordAuthentication no
@@ -187,16 +262,22 @@ ClientAliveCountMax 3
 TMOUT 900 seconds
 ```
 
-`PermitRootLogin prohibit-password` berarti root masih dapat login menggunakan SSH key, tetapi tidak menggunakan password.
+`PermitRootLogin prohibit-password` berarti root masih diperbolehkan login menggunakan SSH key, tetapi tidak menggunakan password.
 
-Script hanya mengubah:
+Script mengubah:
 
 ```text
 /etc/ssh/sshd_config
 /etc/profile.d/99-session-timeout.sh
 ```
 
-Script **tidak membuat atau mengubah file baru di `/etc/ssh/sshd_config.d/`**.
+Script **tidak membuat file baru di `/etc/ssh/sshd_config.d/`**.
+
+Namun effective configuration OpenSSH tetap dapat dipengaruhi oleh file yang sudah ada di:
+
+```text
+/etc/ssh/sshd_config.d/*.conf
+```
 
 ### Menjalankan Apply + Verifikasi
 
@@ -205,16 +286,49 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/s
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/session_timeout_verify_multios.sh | sudo bash
 ```
 
-Jika ingin mengubah idle timeout, misalnya menjadi 10 menit:
+## Jika ingin tetap menggunakan password login
+
+Default script akan mengubah:
 
 ```text
-SESSION_TIMEOUT=600
+PasswordAuthentication no
 ```
 
-Default saat ini:
+Jika password login harus tetap digunakan, ubah policy di apply script menjadi:
+
+```text
+PasswordAuthentication yes
+```
+
+dan pastikan effective configuration pada:
+
+```text
+/etc/ssh/sshd_config
+/etc/ssh/sshd_config.d/*.conf
+```
+
+tidak menimpa nilai tersebut.
+
+Periksa dengan:
+
+```bash
+sshd -T | grep -Ei 'passwordauthentication|permitrootlogin|kbdinteractiveauthentication'
+```
+
+## Mengubah Interactive Idle Timeout
+
+Default:
 
 ```text
 SESSION_TIMEOUT=900
+```
+
+atau 15 menit.
+
+Contoh 10 menit:
+
+```text
+SESSION_TIMEOUT=600
 ```
 
 ---
@@ -223,7 +337,7 @@ SESSION_TIMEOUT=900
 
 ## Fungsi
 
-Mengaktifkan dan menerapkan rule audit untuk mencatat perubahan keamanan penting.
+Mengaktifkan dan menerapkan audit rule untuk mencatat perubahan keamanan penting pada sistem.
 
 Rule utama meliputi:
 
@@ -235,7 +349,7 @@ Rule utama meliputi:
 - login record
 - session record
 - permission/ownership change
-- unauthorized access
+- unauthorized file access
 - delete/rename
 - sudo configuration
 - privileged command execution
@@ -247,13 +361,15 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/a
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/auditd_verifikasi_multios.sh | sudo bash
 ```
 
-Managed rules disimpan pada:
+Managed rules saat ini disimpan pada:
 
 ```text
 /etc/audit/rules.d/50-dbalance-hardening.rules
 ```
 
-Verifier juga memastikan:
+Nama file tersebut dipertahankan untuk kompatibilitas repository, tetapi rule di dalamnya dapat digunakan pada server Linux umum.
+
+Verifier memastikan:
 
 ```text
 auditd active
@@ -268,7 +384,7 @@ lost audit events = 0
 
 ## Fungsi
 
-Membuat `/tmp` sebagai dedicated `tmpfs` dengan opsi keamanan:
+Membuat `/tmp` sebagai dedicated `tmpfs` dengan:
 
 ```text
 nodev
@@ -290,7 +406,7 @@ Managed unit:
 /etc/systemd/system/tmp.mount
 ```
 
-Jika `/tmp` sedang digunakan oleh proses aktif, script dapat menunda aktivasi live dan mengaktifkannya pada reboot berikutnya untuk menghindari gangguan service.
+Jika `/tmp` sedang digunakan oleh proses aktif, script dapat menunda live activation untuk menghindari gangguan service. Dalam kondisi tersebut reboot pada maintenance window mungkin diperlukan.
 
 ---
 
@@ -315,12 +431,14 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/s
 
 Script memastikan:
 
-- filesystem tetap `tmpfs`
-- `nodev`
-- `nosuid`
-- `noexec`
-- owner `root:root`
-- permission `1777`
+```text
+filesystem = tmpfs
+nodev
+nosuid
+noexec
+owner = root:root
+permission = 1777
+```
 
 Konfigurasi persistent disimpan melalui `/etc/fstab`.
 
@@ -330,7 +448,7 @@ Konfigurasi persistent disimpan melalui `/etc/fstab`.
 
 ## Fungsi
 
-Membuat `/var/tmp` sebagai bind mount dari `/tmp`, kemudian menerapkan:
+Membuat `/var/tmp` sebagai bind mount dari `/tmp` dengan:
 
 ```text
 rw
@@ -347,13 +465,13 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/v
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/var_tmp_hardening_verifikasi_multios.sh | sudo bash
 ```
 
-Entry fstab:
+Entry `/etc/fstab`:
 
 ```text
 /tmp /var/tmp none rw,nodev,nosuid,noexec,bind 0 0
 ```
 
-> Perhatian: apabila `/tmp` menggunakan `tmpfs`, maka `/var/tmp` juga menggunakan backing storage yang sama dan menjadi **non-persistent setelah reboot**. Ini merupakan konsekuensi dari desain bind mount ini.
+> **Perhatian:** apabila `/tmp` menggunakan `tmpfs`, maka `/var/tmp` menggunakan backing storage yang sama dan menjadi **non-persistent setelah reboot**. Pertimbangkan kebutuhan aplikasi sebelum menerapkan kontrol ini.
 
 ---
 
@@ -361,9 +479,9 @@ Entry fstab:
 
 ## Fungsi
 
-Memastikan seluruh world-writable directory pada filesystem lokal mempunyai sticky bit.
+Memastikan world-writable directory pada filesystem lokal mempunyai sticky bit.
 
-Contoh direktori penting:
+Contoh:
 
 ```text
 /tmp
@@ -372,7 +490,7 @@ Contoh direktori penting:
 /run/lock
 ```
 
-Sticky bit mencegah user menghapus file milik user lain pada shared directory.
+Sticky bit mencegah user biasa menghapus file milik user lain pada shared directory.
 
 ### Menjalankan Apply + Verifikasi
 
@@ -387,24 +505,29 @@ Jika output apply menunjukkan:
 Directories fixed: 0
 ```
 
-itu normal dan berarti seluruh directory yang ditemukan sudah mempunyai sticky bit.
+itu normal. Artinya tidak ditemukan world-writable directory yang membutuhkan perbaikan sticky bit.
 
 ---
 
-# 9. Login Banner Hardening
+# 9. Login Banner Hardening — OPSIONAL
+
+## Status
+
+**Kontrol ini opsional dan tidak bersifat generic.**
+
+Script saat ini memasang banner milik:
+
+```text
+DATACOMM / DCloud
+```
+
+Karena itu **jangan menjalankan script ini pada server organisasi lain** kecuali Anda memang berhak menggunakan banner tersebut atau sudah mengganti kontennya dengan legal notice milik organisasi Anda sendiri.
 
 ## Fungsi
 
-Mengganti `/etc/issue` dengan warning banner DATACOMM dan mencegah informasi distro/versi OS ditampilkan pada local login banner.
+Mengganti `/etc/issue` dengan warning banner DATACOMM/DCloud dan menghindari disclosure informasi distro/versi OS pada local login banner.
 
-Policy file:
-
-```text
-owner      : root:root
-permission : 0644
-```
-
-Banner berisi:
+Default banner mengandung:
 
 ```text
 USAGE WARNING
@@ -413,12 +536,27 @@ consent to monitoring
 unauthorized-use warning
 ```
 
-### Menjalankan Apply + Verifikasi
+Policy file:
+
+```text
+owner      : root:root
+permission : 0644
+```
+
+### Menjalankan Apply + Verifikasi — hanya untuk lingkungan DATACOMM/DCloud
 
 ```bash
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/login_banner_hardening_multios.sh | sudo bash
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/login_banner_verifikasi_multios.sh | sudo bash
 ```
+
+Untuk penggunaan umum, edit terlebih dahulu isi banner pada:
+
+```text
+login_banner_hardening_multios.sh
+```
+
+dan sesuaikan verifier jika wording organisasi Anda berbeda.
 
 Script hanya mengelola:
 
@@ -426,7 +564,7 @@ Script hanya mengelola:
 /etc/issue
 ```
 
-dan tidak mengubah `sshd_config`.
+dan tidak mengubah konfigurasi SSH.
 
 ---
 
@@ -434,7 +572,7 @@ dan tidak mengubah `sshd_config`.
 
 ## Fungsi
 
-Menggunakan Chrony sebagai service sinkronisasi waktu dan menggunakan Indonesia NTP Pool.
+Menggunakan Chrony sebagai service sinkronisasi waktu dan mengarahkannya ke Indonesia NTP Pool.
 
 NTP server:
 
@@ -452,10 +590,10 @@ curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/c
 curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/chrony_hardening_verifikasi_multios.sh | sudo bash
 ```
 
-Perbedaan otomatis berdasarkan OS:
+Perbedaan otomatis:
 
 ```text
-Ubuntu/Debian
+Ubuntu / Debian
 Configuration : /etc/chrony/chrony.conf
 Service       : chrony.service
 
@@ -466,29 +604,31 @@ Service       : chronyd.service
 
 Verifier memeriksa:
 
-- Chrony ter-install
+- package Chrony ter-install
 - service active dan enabled
-- empat server Indonesia terkonfigurasi
+- 4 server NTP Indonesia terkonfigurasi
 - syntax konfigurasi valid
 - source NTP tersedia
 - selected source tersedia
 - stratum valid
-- Leap status `Normal`
+- `Leap status = Normal`
 - system clock synchronized
 - `systemd-timesyncd` tidak aktif
 - tidak ada konflik dengan legacy `ntpd`
 
-Sesaat setelah restart Chrony, source dapat terlihat sebagai:
+Sesaat setelah Chrony direstart, source dapat terlihat:
 
 ```text
 ^?
 ```
 
-Tunggu sekitar 30–90 detik dan cek kembali. Kondisi normal biasanya akan mempunyai:
+Tunggu sekitar 30–90 detik kemudian periksa kembali.
+
+Kondisi normal biasanya:
 
 ```text
-^*  selected source
-^+  usable source
+^*  selected / current best source
+^+  valid combined source
 ^-  valid but not selected
 ```
 
@@ -496,7 +636,7 @@ Tunggu sekitar 30–90 detik dan cek kembali. Kondisi normal biasanya akan mempu
 
 # Recommended Execution Order
 
-Untuk deployment server baru, urutan yang disarankan:
+Untuk server baru, urutan yang disarankan:
 
 ```text
 1. Password Policy
@@ -507,30 +647,34 @@ Untuk deployment server baru, urutan yang disarankan:
 6. /dev/shm
 7. /var/tmp
 8. Sticky Bit
-9. Login Banner
+9. Login Banner — OPTIONAL
 10. Chrony / NTP
 ```
 
 Setiap **apply script sebaiknya langsung diikuti verification script** sebelum melanjutkan ke kontrol berikutnya.
 
+Login Banner nomor 9 dapat dilewati sepenuhnya apabila server bukan milik DATACOMM/DCloud atau organisasi Anda menggunakan banner sendiri.
+
 ---
 
-# Pre-Hardening Recommendation
+# Pre-Hardening Checklist
 
-Sebelum menjalankan script pada production:
+Sebelum menjalankan hardening pada production:
 
-1. Pastikan akses console tersedia.
+1. Pastikan akses console/recovery tersedia.
 2. Buat snapshot atau backup VM.
-3. Pertahankan satu SSH session aktif selama hardening SSH/PAM.
-4. Uji terlebih dahulu pada staging/test VM dengan OS yang sama.
-5. Jalankan verification script setelah setiap apply.
-6. Jika melakukan perubahan PAM/SSH, lakukan duplicate SSH login sebelum menutup session existing.
+3. Pastikan SSH key/public-key login sudah berhasil.
+4. Pertahankan satu SSH session aktif saat mengubah PAM/SSH.
+5. Uji script terlebih dahulu pada staging/test VM dengan OS yang sama.
+6. Jalankan verification script setelah setiap apply.
+7. Lakukan duplicate SSH login test setelah perubahan PAM/SSH.
+8. Jangan reboot sebelum memastikan konfigurasi filesystem dan service valid.
+9. Periksa kebutuhan aplikasi terhadap `/tmp`, `/dev/shm`, dan `/var/tmp`.
+10. Sesuaikan policy organisasi sebelum deployment massal.
 
 ---
 
-# Custom Policy Summary
-
-Default repository saat ini:
+# Default Security Policy Summary
 
 | Control | Default |
 |---|---|
@@ -545,26 +689,65 @@ Default repository saat ini:
 | Temporary ban | 10 minutes |
 | Failure observation window | 15 minutes |
 | Interactive idle timeout | 15 minutes |
-| SSH password authentication | Disabled |
+| SSH password authentication | **Disabled** |
 | Root SSH login | SSH key only |
 | `/tmp` | tmpfs + nodev,nosuid,noexec |
 | `/dev/shm` | tmpfs + nodev,nosuid,noexec |
 | `/var/tmp` | bind from `/tmp` + nodev,nosuid,noexec |
+| Sticky bit | Enforced on world-writable directories |
+| Login Banner | **Optional — DATACOMM/DCloud-specific by default** |
 | NTP | Indonesia NTP Pool |
-
-Untuk policy organisasi yang membutuhkan:
-
-```text
-Password Expiry : 90 days
-Account Lockout : 3 failed attempts
-```
-
-ikuti bagian **1. Password Policy** dan **2. Account Lockout** pada README ini sebelum deployment ke production.
 
 ---
 
-## Repository
+# Common Customization Examples
+
+## Password Expiry 90 Days
+
+```text
+PASS_MAX_DAYS = 90
+PASS_MIN_DAYS = 1
+PASS_WARN_AGE = 7
+```
+
+Existing users:
+
+```bash
+chage -M 90 -m 1 -W 7 USERNAME
+```
+
+## Account Lockout 3 Attempts
+
+```text
+deny = 3
+fail_interval = 900
+unlock_time = 600
+```
+
+## Keep SSH Password Login Enabled
+
+Ubah policy nomor 3 agar:
+
+```text
+PasswordAuthentication yes
+```
+
+kemudian pastikan effective configuration:
+
+```bash
+sshd -T | grep -Ei 'passwordauthentication|permitrootlogin|kbdinteractiveauthentication'
+```
+
+---
+
+# Repository
 
 ```text
 https://github.com/ica4me/linux-hardening-scripts
 ```
+
+## Disclaimer
+
+Script ini disediakan sebagai baseline hardening umum. Setiap environment dapat mempunyai kebutuhan autentikasi, aplikasi, filesystem, compliance, dan availability yang berbeda.
+
+Selalu review script, lakukan backup, uji pada staging, dan sesuaikan dengan policy organisasi sebelum diterapkan pada production.
