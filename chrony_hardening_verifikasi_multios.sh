@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 set -u
 
-# Cross-platform Chrony configuration verification.
+# Cross-platform Chrony verification with synchronization grace period.
 # Supported:
 # - Ubuntu 22.04 / 24.04
 # - Debian 12 / 13
 # - RHEL 9 / 10.x
 #
-# Read-only: this script does not modify the system.
+# Read-only: this script does not modify Chrony configuration.
+#
+# The verifier waits for Chrony to synchronize after a recent restart
+# instead of reporting an immediate false FAIL.
+#
+# Optional environment variables:
+#   CHRONY_WAIT_TIMEOUT=120   Maximum wait time in seconds
+#   CHRONY_WAIT_INTERVAL=10   Check interval in seconds
 
 NTP_SERVERS=(
     "0.id.pool.ntp.org"
@@ -16,11 +23,16 @@ NTP_SERVERS=(
     "3.id.pool.ntp.org"
 )
 
+WAIT_TIMEOUT="${CHRONY_WAIT_TIMEOUT:-120}"
+WAIT_INTERVAL="${CHRONY_WAIT_INTERVAL:-10}"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
 pass() { echo "[PASS] $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo "[FAIL] $*"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+info() { echo "[INFO] $*"; }
+waitmsg() { echo "[WAIT] $*"; }
 
 [[ -r /etc/os-release ]] || {
     echo "[FAIL] /etc/os-release not found"
@@ -71,8 +83,15 @@ case "${OS_ID}" in
         ;;
 esac
 
+for cmd in chronyc chronyd systemctl grep awk stat; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+        echo "[FAIL] Required command not found: ${cmd}"
+        exit 1
+    fi
+done
+
 echo "============================================"
-echo " DBalance Cross-Platform Chrony Verification"
+echo " Cross-Platform Chrony Verification"
 echo " OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
 echo "============================================"
 echo
@@ -146,18 +165,10 @@ fi
 echo
 echo "--- Synchronization ---"
 
-TRACKING="$(chronyc tracking 2>/dev/null || true)"
-
-if grep -q "Leap status.*Normal" <<< "${TRACKING}"; then
-    pass "Chrony leap status = Normal"
-else
-    LEAP_STATUS="$(awk -F: '/Leap status/{gsub(/^[[:space:]]+/,"",$2); print $2}' <<< "${TRACKING}")"
-    fail "Chrony leap status = ${LEAP_STATUS:-UNKNOWN}"
-fi
-
+# Count all Chrony source rows, regardless of current source state.
 SOURCE_COUNT="$(
-    chronyc sources 2>/dev/null |
-    grep -Ec '^[\^\=\#][\*\+\-\?x~]' || true
+    chronyc sources -n 2>/dev/null |
+    awk '$1 ~ /^[\^\=\#]/ {count++} END {print count+0}'
 )"
 
 if [[ "${SOURCE_COUNT}" =~ ^[0-9]+$ ]] && (( SOURCE_COUNT > 0 )); then
@@ -166,40 +177,83 @@ else
     fail "No Chrony NTP sources available"
 fi
 
-SELECTED_SOURCE="$(
-    chronyc sources -n 2>/dev/null |
-    awk '$1 ~ /^\^\*/ {print $2; exit}'
-)"
+# Chrony may need time to collect samples after daemon restart.
+# Wait until all core synchronization indicators become healthy.
+ELAPSED=0
+SYNC_READY=0
 
-if [[ -n "${SELECTED_SOURCE}" ]]; then
+while (( ELAPSED <= WAIT_TIMEOUT )); do
+    TRACKING="$(chronyc tracking 2>/dev/null || true)"
+    SOURCES="$(chronyc sources -n 2>/dev/null || true)"
+
+    LEAP_STATUS="$(
+        awk -F: '/Leap status/ {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+            print $2
+            exit
+        }' <<< "${TRACKING}"
+    )"
+
+    STRATUM="$(
+        awk -F: '/^Stratum/ {
+            gsub(/[[:space:]]/, "", $2)
+            print $2
+            exit
+        }' <<< "${TRACKING}"
+    )"
+
+    SELECTED_SOURCE="$(
+        awk '$1 == "^*" {print $2; exit}' <<< "${SOURCES}"
+    )"
+
+    SYNCED="$(
+        timedatectl show \
+            --property=NTPSynchronized \
+            --value 2>/dev/null || true
+    )"
+
+    if [[ "${LEAP_STATUS}" == "Normal" ]] &&
+       [[ -n "${SELECTED_SOURCE}" ]] &&
+       [[ "${STRATUM}" =~ ^[0-9]+$ ]] &&
+       (( STRATUM > 0 && STRATUM < 16 )) &&
+       [[ "${SYNCED}" == "yes" ]]; then
+        SYNC_READY=1
+        break
+    fi
+
+    if (( ELAPSED >= WAIT_TIMEOUT )); then
+        break
+    fi
+
+    waitmsg "Chrony not synchronized yet: leap=${LEAP_STATUS:-UNKNOWN}, selected=${SELECTED_SOURCE:-NONE}, stratum=${STRATUM:-UNKNOWN}, NTPSynchronized=${SYNCED:-UNKNOWN}. Waiting ${WAIT_INTERVAL}s..."
+    sleep "${WAIT_INTERVAL}"
+    ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+done
+
+if (( SYNC_READY == 1 )); then
+    pass "Chrony leap status = Normal"
     pass "Selected NTP source = ${SELECTED_SOURCE}"
-else
-    fail "No selected NTP source"
-fi
-
-STRATUM="$(
-    chronyc tracking 2>/dev/null |
-    awk -F: '/Stratum/{gsub(/[[:space:]]/,"",$2); print $2}'
-)"
-
-if [[ "${STRATUM}" =~ ^[0-9]+$ ]] && (( STRATUM > 0 && STRATUM < 16 )); then
     pass "Chrony stratum = ${STRATUM}"
+    pass "System clock synchronized"
+    info "Synchronization became healthy after ${ELAPSED} second(s)."
 else
+    fail "Chrony leap status = ${LEAP_STATUS:-UNKNOWN}"
+    fail "Selected NTP source = ${SELECTED_SOURCE:-NONE}"
     fail "Chrony stratum = ${STRATUM:-UNKNOWN}"
+    fail "System clock synchronized = ${SYNCED:-UNKNOWN}"
+    info "Synchronization did not become healthy within ${WAIT_TIMEOUT} seconds."
 fi
 
 echo
-echo "--- Time Status ---"
+echo "--- Source State ---"
 
-SYNCED="$(
-    timedatectl show \
-        --property=NTPSynchronized \
-        --value 2>/dev/null || true
-)"
-
-[[ "${SYNCED}" == "yes" ]] &&
-    pass "System clock synchronized" ||
-    fail "System clock not synchronized"
+chronyc sources -n 2>/dev/null |
+awk '
+    $1 ~ /^[\^\=\#][*+\-?x~]/ {
+        printf "  %-3s %-40s stratum=%-3s reach=%-4s lastRx=%s\n",
+               $1, $2, $3, $5, $6
+    }
+' || true
 
 echo
 echo "--- Conflict Check ---"
