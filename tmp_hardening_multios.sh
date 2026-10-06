@@ -80,7 +80,7 @@ fi
 
 cat > "${UNIT}" <<'EOF'
 [Unit]
-Description=DBalance Hardened Temporary Directory /tmp
+Description=Hardened Temporary Directory /tmp
 Documentation=man:hier(7)
 Before=local-fs.target
 After=swap.target

@@ -2,12 +2,26 @@
 
 Repository ini berisi kumpulan script hardening Linux yang dapat digunakan secara umum oleh siapa saja untuk meningkatkan baseline keamanan server Linux.
 
-Script **tidak khusus untuk DBalance**. Script dapat digunakan pada server aplikasi, web server, middleware, database server, monitoring server, utility server, VM cloud, maupun server Linux lain selama sistem operasinya termasuk dalam daftar yang didukung.
-
 Setiap kontrol hardening terdiri dari dua script:
 
 - **Apply** — menerapkan konfigurasi hardening.
 - **Verifikasi** — melakukan pengecekan read-only terhadap hasil konfigurasi.
+
+---
+
+# OS yang Didukung
+
+Script dirancang untuk digunakan pada:
+
+| Distribusi | Versi |
+|---|---|
+| Ubuntu | 22.04 LTS, 24.04 LTS |
+| Debian | 12, 13 |
+| Red Hat Enterprise Linux | 9.x, 10.x termasuk RHEL 10.2 |
+
+Script mendeteksi distribusi dan versi OS sebelum menerapkan konfigurasi.
+
+Jalankan menggunakan user dengan hak `sudo` atau sebagai `root`.
 
 ---
 
@@ -71,22 +85,6 @@ sshd -T | grep -Ei 'passwordauthentication|permitrootlogin|kbdinteractiveauthent
 Kemudian lakukan **duplicate SSH login test** sebelum menutup session lama.
 
 > Untuk server production, sangat disarankan mempunyai akses console, KVM, serial console, cloud console, atau mekanisme recovery lain sebelum mengubah konfigurasi PAM dan SSH.
-
----
-
-# OS yang Didukung
-
-Script dirancang untuk digunakan pada:
-
-| Distribusi | Versi |
-|---|---|
-| Ubuntu | 22.04 LTS, 24.04 LTS |
-| Debian | 12, 13 |
-| Red Hat Enterprise Linux | 9.x, 10.x termasuk RHEL 10.2 |
-
-Script mendeteksi distribusi dan versi OS sebelum menerapkan konfigurasi.
-
-Jalankan menggunakan user dengan hak `sudo` atau sebagai `root`.
 
 ---
 

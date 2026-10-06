@@ -51,7 +51,7 @@ case "${OS_ID}" in
 esac
 
 echo "==========================================="
-echo " DBalance Cross-Platform /tmp Verification"
+echo " Cross-Platform /tmp Hardening Verification"
 echo " OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
 echo "==========================================="
 echo
@@ -86,8 +86,15 @@ else
 fi
 
 UNIT_OPTIONS="$(
-    awk -F= '$1=="Options"{print $2; exit}' "${UNIT}" 2>/dev/null
+    sed -n 's/^[[:space:]]*Options[[:space:]]*=[[:space:]]*//p' "${UNIT}" 2>/dev/null |
+    head -n 1
 )"
+
+if [[ -n "${UNIT_OPTIONS}" ]]; then
+    pass "tmp.mount Options parsed: ${UNIT_OPTIONS}"
+else
+    fail "tmp.mount Options line missing or unreadable"
+fi
 
 for option in nodev nosuid noexec; do
     if grep -qw "${option}" <<< "${UNIT_OPTIONS//,/ }"; then
