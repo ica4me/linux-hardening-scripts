@@ -88,6 +88,35 @@ Kemudian lakukan **duplicate SSH login test** sebelum menutup session lama.
 
 ---
 
+# 0. Update Kernel
+
+## Fungsi
+
+Mengupdate versi kernel OS ke versi yang paling baru.
+Khusus Script ini Didukung banyak OS:
+- Ubuntu 20.04 / 22.04 / 24.04 / 26.04
+- Debian 11 / 12 / 13
+- RHEL 9 / 10.x
+- Rocky Linux 9 / 10.x
+- AlmaLinux 9 / 10.x
+- Fedora berbasis dnf
+
+### Menjalankan Apply + Verifikasi
+
+```bash
+curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/kernel_update_multios.sh | sudo bash
+```
+```bash
+sudo reboot
+```
+```bash
+curl -sL https://raw.githubusercontent.com/ica4me/linux-hardening-scripts/main/kernel_update_verifikasi_multios.sh | sudo bash
+```
+
+> Update kernel ini adalah kernel standar bawaan misal GA (General Availability) bukan kernel backport.
+
+---
+
 # 1. Password Policy
 
 ## Fungsi
