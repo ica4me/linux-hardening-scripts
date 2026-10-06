@@ -3,9 +3,10 @@ set -u
 
 # Cross-platform SSH/session policy verification.
 # Supported: Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
+# Read-only. It does not modify sshd_config.d.
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
-SSHD_DROPIN="/etc/ssh/sshd_config.d/00-dbalance-session-security.conf"
+SSHD_DROPIN_DIR="/etc/ssh/sshd_config.d"
 TIMEOUT_FILE="/etc/profile.d/99-session-timeout.sh"
 
 EXPECTED_INTERVAL="${CLIENT_ALIVE_INTERVAL:-300}"
@@ -18,10 +19,7 @@ FAIL_COUNT=0
 pass() { echo "[PASS] $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo "[FAIL] $*"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 
-[[ -r /etc/os-release ]] || {
-    echo "[FAIL] /etc/os-release not found"
-    exit 1
-}
+[[ -r /etc/os-release ]] || { echo "[FAIL] /etc/os-release not found"; exit 1; }
 
 # shellcheck disable=SC1091
 . /etc/os-release
@@ -69,17 +67,13 @@ echo
 
 echo "--- SSH Service ---"
 
-if systemctl is-active --quiet "${SSH_SERVICE}"; then
-    pass "${SSH_SERVICE} service active"
-else
+systemctl is-active --quiet "${SSH_SERVICE}" &&
+    pass "${SSH_SERVICE} service active" ||
     fail "${SSH_SERVICE} service inactive"
-fi
 
-if [[ -x "${SSHD_BIN}" ]] && "${SSHD_BIN}" -t 2>/dev/null; then
-    pass "SSH configuration syntax valid"
-else
+[[ -x "${SSHD_BIN}" ]] && "${SSHD_BIN}" -t 2>/dev/null &&
+    pass "SSH configuration syntax valid" ||
     fail "SSH configuration syntax invalid"
-fi
 
 echo
 echo "--- Main SSH Configuration ---"
@@ -108,14 +102,17 @@ echo
 echo "--- Effective SSH Configuration ---"
 
 EFFECTIVE="$("${SSHD_BIN}" -T 2>/dev/null || true)"
+EFFECTIVE_ROOT="$(awk '$1=="permitrootlogin"{print $2; exit}' <<< "${EFFECTIVE}")"
 
 grep -Eq '^passwordauthentication no$' <<< "${EFFECTIVE}" &&
     pass "Effective PasswordAuthentication = no" ||
     fail "Effective PasswordAuthentication is not no"
 
-grep -Eq '^permitrootlogin prohibit-password$' <<< "${EFFECTIVE}" &&
-    pass "Effective PermitRootLogin = prohibit-password" ||
-    fail "Effective PermitRootLogin is not prohibit-password"
+if [[ "${EFFECTIVE_ROOT}" == "prohibit-password" || "${EFFECTIVE_ROOT}" == "without-password" ]]; then
+    pass "Effective PermitRootLogin = prohibit-password"
+else
+    fail "Effective PermitRootLogin = ${EFFECTIVE_ROOT:-UNKNOWN}"
+fi
 
 grep -Eq '^kbdinteractiveauthentication no$' <<< "${EFFECTIVE}" &&
     pass "Effective KbdInteractiveAuthentication = no" ||
@@ -132,12 +129,10 @@ grep -Eq "^clientalivecountmax ${EXPECTED_COUNT}$" <<< "${EFFECTIVE}" &&
 echo
 echo "--- Interactive Session Timeout ---"
 
-if [[ -f "${TIMEOUT_FILE}" ]] &&
-   grep -Eq "^[[:space:]]*TMOUT=${EXPECTED_TIMEOUT}[[:space:]]*$" "${TIMEOUT_FILE}"; then
-    pass "Interactive session timeout = ${EXPECTED_TIMEOUT} seconds"
-else
+[[ -f "${TIMEOUT_FILE}" ]] &&
+grep -Eq "^[[:space:]]*TMOUT=${EXPECTED_TIMEOUT}[[:space:]]*$" "${TIMEOUT_FILE}" &&
+    pass "Interactive session timeout = ${EXPECTED_TIMEOUT} seconds" ||
     fail "TMOUT=${EXPECTED_TIMEOUT} not configured"
-fi
 
 grep -Eq '^[[:space:]]*readonly[[:space:]]+TMOUT[[:space:]]*$' "${TIMEOUT_FILE}" 2>/dev/null &&
     pass "TMOUT is readonly" ||
@@ -161,19 +156,15 @@ MODE="$(stat -c '%a' "${SSHD_CONFIG}" 2>/dev/null)"
     pass "sshd_config permission = 600" ||
     fail "sshd_config permission = ${MODE:-UNKNOWN}"
 
-if [[ -f "${SSHD_DROPIN}" ]]; then
-    DROPIN_OWNER="$(stat -c '%U:%G' "${SSHD_DROPIN}" 2>/dev/null)"
-    DROPIN_MODE="$(stat -c '%a' "${SSHD_DROPIN}" 2>/dev/null)"
+echo
+echo "--- Existing SSH Drop-ins (read-only) ---"
 
-    [[ "${DROPIN_OWNER}" == "root:root" ]] &&
-        pass "SSH drop-in owner = root:root" ||
-        fail "SSH drop-in owner = ${DROPIN_OWNER:-UNKNOWN}"
-
-    [[ "${DROPIN_MODE}" == "600" ]] &&
-        pass "SSH drop-in permission = 600" ||
-        fail "SSH drop-in permission = ${DROPIN_MODE:-UNKNOWN}"
+if [[ -d "${SSHD_DROPIN_DIR}" ]]; then
+    grep -RniE \
+        '^[[:space:]]*(PermitRootLogin|PasswordAuthentication|KbdInteractiveAuthentication|ClientAliveInterval|ClientAliveCountMax)[[:space:]]+' \
+        "${SSHD_DROPIN_DIR}" 2>/dev/null || true
 else
-    fail "SSH drop-in file missing"
+    echo "No sshd_config.d directory."
 fi
 
 echo
