@@ -91,7 +91,7 @@ awk '
 cat >> "${FSTAB}.tmp" <<'EOF'
 
 # Hardened /var/tmp bind mount
-/tmp /var/tmp none rw,nodev,nosuid,noexec,bind 0 0
+/tmp /var/tmp none rw,noexec,nosuid,nodev,bind 0 0
 EOF
 
 chown --reference="${FSTAB}" "${FSTAB}.tmp" 2>/dev/null || chown root:root "${FSTAB}.tmp"
@@ -126,7 +126,7 @@ else
 fi
 
 # Apply independent VFS security flags to the bind mount.
-mount -o remount,bind,rw,nodev,nosuid,noexec "${VAR_TMP_DIR}" ||
+mount -o remount,bind,rw,noexec,nosuid,nodev "${VAR_TMP_DIR}" ||
     fail "Failed to apply security mount options to ${VAR_TMP_DIR}."
 
 chmod 1777 "${VAR_TMP_DIR}"

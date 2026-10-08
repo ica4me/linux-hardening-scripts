@@ -79,7 +79,7 @@ awk '
 cat >> "${FSTAB}.tmp" <<'EOF'
 
 # Hardened shared memory
-tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec,mode=1777 0 0
+tmpfs /dev/shm tmpfs defaults,noexec,nodev,nosuid,seclabel 0 0
 EOF
 
 chown --reference="${FSTAB}" "${FSTAB}.tmp" 2>/dev/null || chown root:root "${FSTAB}.tmp"
@@ -98,7 +98,7 @@ if mountpoint -q "${SHM}"; then
     [[ "${FSTYPE}" == "tmpfs" ]] ||
         fail "${SHM} is mounted as ${FSTYPE:-UNKNOWN}, expected tmpfs."
 
-    mount -o remount,nodev,nosuid,noexec,mode=1777 "${SHM}" ||
+    mount -o remount,defaults,noexec,nodev,nosuid,seclabel "${SHM}" ||
         fail "Failed to remount ${SHM}."
 else
     mount "${SHM}" ||

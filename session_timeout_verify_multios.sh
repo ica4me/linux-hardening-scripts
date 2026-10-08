@@ -69,6 +69,9 @@ check_main() {
         fail "${description}"
 }
 
+check_main '^[[:space:]]*Protocol[[:space:]]+2[[:space:]]*$' \
+    "Protocol = 2"
+
 check_main '^[[:space:]]*Ciphers[[:space:]]+aes128-ctr,aes192-ctr,aes256-ctr[[:space:]]*$' \
     "Ciphers configured"
 
