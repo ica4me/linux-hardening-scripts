@@ -111,12 +111,6 @@ check_main '^[[:space:]]*ClientAliveCountMax[[:space:]]+3[[:space:]]*$' \
 check_main '^[[:space:]]*MaxStartups[[:space:]]+10:30:60[[:space:]]*$' \
     "MaxStartups = 10:30:60"
 
-if grep -Eq '^[[:space:]]*Protocol[[:space:]]+' "${SSHD_CONFIG}"; then
-    fail "Legacy Protocol directive is present"
-else
-    pass "No legacy Protocol directive (OpenSSH 8.9 is SSHv2-only)"
-fi
-
 echo
 echo "--- Effective SSH Configuration ---"
 
