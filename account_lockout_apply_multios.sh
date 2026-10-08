@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Cross-platform account lockout policy.
-# Supported: Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
-# Policy: 5 failed attempts -> temporary ban for 10 minutes.
+# Cross-platform Account Lockout policy.
+# Supported:
+# - Ubuntu 22.04 / 24.04
+# - Debian 12 / 13
+# - RHEL 9 / 10.x
+#
+# Default policy:
+# deny=3
+# fail_interval=900
+# unlock_time=1800
+#
+# Result:
+# - 3 failed attempts inside 15 minutes
+# - temporary lock for 30 minutes
+#
+# Password complexity/history/expiry are intentionally handled separately.
 
-LOCKOUT_DENY="${LOCKOUT_DENY:-5}"
+LOCKOUT_DENY="${LOCKOUT_DENY:-3}"
 FAIL_INTERVAL="${FAIL_INTERVAL:-900}"
-UNLOCK_TIME="${UNLOCK_TIME:-600}"
+UNLOCK_TIME="${UNLOCK_TIME:-1800}"
 
 FAILLOCK_CONF="/etc/security/faillock.conf"
 BACKUP_ROOT="/var/backups/account-lockout"
@@ -93,11 +106,7 @@ if [[ "${FAMILY}" == "debian" ]]; then
     [[ -f "${COMMON_ACCOUNT}" ]] || fail "${COMMON_ACCOUNT} not found."
 
     PAM_FAILLOCK="$(
-        find /lib /usr/lib \
-            -type f \
-            -name pam_faillock.so \
-            -print \
-            -quit 2>/dev/null
+        find /lib /usr/lib -type f -name pam_faillock.so -print -quit 2>/dev/null
     )"
 
     [[ -n "${PAM_FAILLOCK}" ]] ||
@@ -121,30 +130,24 @@ else
         fail "No active authselect profile found."
 fi
 
-# Temporary lockout policy.
 set_value "${FAILLOCK_CONF}" "deny" "${LOCKOUT_DENY}"
 set_value "${FAILLOCK_CONF}" "fail_interval" "${FAIL_INTERVAL}"
 set_value "${FAILLOCK_CONF}" "unlock_time" "${UNLOCK_TIME}"
 
 if [[ "${FAMILY}" == "debian" ]]; then
-    # Remove existing faillock entries to keep the configuration idempotent.
     sed -i '/pam_faillock\.so/d' "${COMMON_AUTH}"
+    sed -i '/pam_faillock\.so/d' "${COMMON_ACCOUNT}"
 
-    # Insert preauth immediately before pam_unix.
     sed -i \
         '/^[[:space:]]*auth[[:space:]].*pam_unix\.so/i\
-auth    required                        pam_faillock.so preauth silent' \
+auth    required                        pam_faillock.so preauth' \
         "${COMMON_AUTH}"
 
-    # Insert authfail/authsucc immediately after pam_unix.
     sed -i \
         '/^[[:space:]]*auth[[:space:]].*pam_unix\.so/a\
 auth    [default=die]                   pam_faillock.so authfail\
 \nauth    sufficient                      pam_faillock.so authsucc' \
         "${COMMON_AUTH}"
-
-    # Keep only one account faillock entry.
-    sed -i '/pam_faillock\.so/d' "${COMMON_ACCOUNT}"
 
     if grep -Eq '^[[:space:]]*# end of pam-auth-update config' "${COMMON_ACCOUNT}"; then
         sed -i \
@@ -152,11 +155,10 @@ auth    [default=die]                   pam_faillock.so authfail\
 account required                        pam_faillock.so' \
             "${COMMON_ACCOUNT}"
     else
-        printf '\n# Temporary login ban policy\naccount required pam_faillock.so\n' \
+        printf '\naccount required                        pam_faillock.so\n' \
             >> "${COMMON_ACCOUNT}"
     fi
 else
-    # RHEL: manage PAM through authselect.
     if ! authselect current | grep -qw 'with-faillock'; then
         authselect enable-feature with-faillock -b >/dev/null
     fi
@@ -167,6 +169,9 @@ fi
 # Validation.
 [[ "$(awk -F= '/^[[:space:]]*deny[[:space:]]*=/{gsub(/[[:space:]]/,"",$2);v=$2} END{print v}' "${FAILLOCK_CONF}")" == "${LOCKOUT_DENY}" ]] ||
     fail "deny validation failed."
+
+[[ "$(awk -F= '/^[[:space:]]*fail_interval[[:space:]]*=/{gsub(/[[:space:]]/,"",$2);v=$2} END{print v}' "${FAILLOCK_CONF}")" == "${FAIL_INTERVAL}" ]] ||
+    fail "fail_interval validation failed."
 
 [[ "$(awk -F= '/^[[:space:]]*unlock_time[[:space:]]*=/{gsub(/[[:space:]]/,"",$2);v=$2} END{print v}' "${FAILLOCK_CONF}")" == "${UNLOCK_TIME}" ]] ||
     fail "unlock_time validation failed."
@@ -181,7 +186,9 @@ if [[ "${FAMILY}" == "debian" ]]; then
     grep -Eq 'pam_faillock\.so[[:space:]]+authsucc' "${COMMON_AUTH}" ||
         fail "pam_faillock authsucc validation failed."
 
-    grep -Eq '^[[:space:]]*account[[:space:]]+required[[:space:]]+pam_faillock\.so' "${COMMON_ACCOUNT}" ||
+    grep -Eq \
+        '^[[:space:]]*account[[:space:]]+required[[:space:]]+pam_faillock\.so' \
+        "${COMMON_ACCOUNT}" ||
         fail "pam_faillock account validation failed."
 else
     authselect check >/dev/null 2>&1 ||
@@ -199,5 +206,4 @@ fi
 
 log "Backup location: ${BACKUP_DIR}"
 log "=== Account Lockout Policy Applied Successfully ==="
-log "Policy: ${LOCKOUT_DENY} failures -> ${UNLOCK_TIME}s temporary ban."
-log "Run /root/account_lockout_verifikasi.sh"
+log "Policy: ${LOCKOUT_DENY} failures within ${FAIL_INTERVAL}s -> ${UNLOCK_TIME}s temporary ban."

@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -u
 
-# Cross-platform account lockout verification.
-# Supported: Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
+# Cross-platform Account Lockout verification.
+# Supported:
+# - Ubuntu 22.04 / 24.04
+# - Debian 12 / 13
+# - RHEL 9 / 10.x
+#
+# Expected default policy:
+# deny=3
+# fail_interval=900
+# unlock_time=1800
 
-EXPECTED_DENY="${LOCKOUT_DENY:-5}"
+EXPECTED_DENY="${LOCKOUT_DENY:-3}"
 EXPECTED_FAIL_INTERVAL="${FAIL_INTERVAL:-900}"
-EXPECTED_UNLOCK_TIME="${UNLOCK_TIME:-600}"
+EXPECTED_UNLOCK_TIME="${UNLOCK_TIME:-1800}"
 
 FAILLOCK_CONF="/etc/security/faillock.conf"
 
@@ -25,17 +33,13 @@ get_value() {
         {
             lhs=$1
             gsub(/[[:space:]]/, "", lhs)
-
             if (lhs == key) {
                 rhs=$2
                 gsub(/[[:space:]]/, "", rhs)
                 value=rhs
             }
         }
-        END {
-            if (value != "")
-                print value
-        }
+        END { if (value != "") print value }
     ' "${file}" 2>/dev/null
 }
 
@@ -80,7 +84,7 @@ case "${OS_ID}" in
 esac
 
 echo "================================================"
-echo " DBalance Account Lockout Verification"
+echo " Cross-Platform Account Lockout Verification"
 echo " OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
 echo "================================================"
 echo
@@ -100,7 +104,7 @@ UNLOCK_TIME_VALUE="$(get_value "${FAILLOCK_CONF}" unlock_time)"
     fail "fail_interval = ${FAIL_INTERVAL_VALUE:-NOT SET}; expected ${EXPECTED_FAIL_INTERVAL}"
 
 [[ "${UNLOCK_TIME_VALUE}" == "${EXPECTED_UNLOCK_TIME}" ]] &&
-    pass "Temporary ban = ${UNLOCK_TIME_VALUE} seconds (10 minutes)" ||
+    pass "Temporary ban = ${UNLOCK_TIME_VALUE} seconds (30 minutes)" ||
     fail "unlock_time = ${UNLOCK_TIME_VALUE:-NOT SET}; expected ${EXPECTED_UNLOCK_TIME}"
 
 echo
@@ -110,21 +114,15 @@ if [[ "${FAMILY}" == "debian" ]]; then
     COMMON_AUTH="/etc/pam.d/common-auth"
     COMMON_ACCOUNT="/etc/pam.d/common-account"
 
-    grep -Eq \
-        'pam_faillock\.so[[:space:]]+preauth' \
-        "${COMMON_AUTH}" &&
+    grep -Eq 'pam_faillock\.so[[:space:]]+preauth' "${COMMON_AUTH}" &&
         pass "pam_faillock preauth active" ||
         fail "pam_faillock preauth inactive"
 
-    grep -Eq \
-        'pam_faillock\.so[[:space:]]+authfail' \
-        "${COMMON_AUTH}" &&
+    grep -Eq 'pam_faillock\.so[[:space:]]+authfail' "${COMMON_AUTH}" &&
         pass "pam_faillock authfail active" ||
         fail "pam_faillock authfail inactive"
 
-    grep -Eq \
-        'pam_faillock\.so[[:space:]]+authsucc' \
-        "${COMMON_AUTH}" &&
+    grep -Eq 'pam_faillock\.so[[:space:]]+authsucc' "${COMMON_AUTH}" &&
         pass "pam_faillock authsucc active" ||
         fail "pam_faillock authsucc inactive"
 
@@ -134,17 +132,13 @@ if [[ "${FAMILY}" == "debian" ]]; then
         pass "pam_faillock account module active" ||
         fail "pam_faillock account module inactive"
 else
-    if command -v authselect >/dev/null 2>&1; then
-        pass "authselect available"
-    else
+    command -v authselect >/dev/null 2>&1 &&
+        pass "authselect available" ||
         fail "authselect not found"
-    fi
 
-    if authselect check >/dev/null 2>&1; then
-        pass "authselect configuration valid"
-    else
+    authselect check >/dev/null 2>&1 &&
+        pass "authselect configuration valid" ||
         fail "authselect configuration invalid"
-    fi
 
     authselect current 2>/dev/null | grep -qw 'with-faillock' &&
         pass "authselect with-faillock enabled" ||
@@ -171,11 +165,9 @@ else
     fail "pam_faillock.so not found"
 fi
 
-if command -v faillock >/dev/null 2>&1; then
-    pass "faillock command available"
-else
+command -v faillock >/dev/null 2>&1 &&
+    pass "faillock command available" ||
     fail "faillock command not found"
-fi
 
 echo
 echo "--- Current Failure Database ---"

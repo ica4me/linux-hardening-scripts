@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Cross-platform password policy:
-# Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
+# Cross-platform Password Policy hardening.
+# Supported:
+# - Ubuntu 22.04 / 24.04
+# - Debian 12 / 13
+# - RHEL 9 / 10.x
+#
+# Policy:
+# - Minimum password length: 14
+# - At least 1 digit
+# - At least 1 uppercase character
+# - At least 1 lowercase character
+# - At least 1 special character
+# - Password history: last 5
+# - Maximum password age: 90 days
+# - Minimum password age: 1 day
+# - Warning before expiry: 7 days
+#
+# Account lockout is intentionally handled by:
+# account_lockout_apply_multios.sh
 
-MINLEN=12
-HISTORY=5
-
-# Temporary login ban.
-LOCKOUT_DENY="${LOCKOUT_DENY:-5}"
-LOCKOUT_TIME="${LOCKOUT_TIME:-600}"
-FAIL_INTERVAL="${FAIL_INTERVAL:-900}"
+MINLEN="14"
+HISTORY="5"
+PASS_MAX_DAYS="90"
+PASS_MIN_DAYS="1"
+PASS_WARN_AGE="7"
 
 PWQUALITY="/etc/security/pwquality.conf"
 PWHISTORY_CONF="/etc/security/pwhistory.conf"
-FAILLOCK="/etc/security/faillock.conf"
 LOGIN_DEFS="/etc/login.defs"
 
 BACKUP_ROOT="/var/backups/password-policy"
@@ -68,7 +82,10 @@ backup_if_exists() {
 }
 
 set_eq_value() {
-    local file="$1" key="$2" value="$3"
+    local file="$1"
+    local key="$2"
+    local value="$3"
+
     touch "${file}"
 
     if grep -Eq "^[[:space:]#]*${key}[[:space:]]*=" "${file}"; then
@@ -81,7 +98,9 @@ set_eq_value() {
 }
 
 set_space_value() {
-    local file="$1" key="$2" value="$3"
+    local file="$1"
+    local key="$2"
+    local value="$3"
 
     if grep -Eq "^[[:space:]]*${key}[[:space:]]+" "${file}"; then
         sed -Ei \
@@ -94,25 +113,19 @@ set_space_value() {
 
 backup_if_exists "${PWQUALITY}"
 backup_if_exists "${PWHISTORY_CONF}"
-backup_if_exists "${FAILLOCK}"
 backup_if_exists "${LOGIN_DEFS}"
 
 if [[ "${FAMILY}" == "debian" ]]; then
     COMMON_PASSWORD="/etc/pam.d/common-password"
-    COMMON_AUTH="/etc/pam.d/common-auth"
-    COMMON_ACCOUNT="/etc/pam.d/common-account"
 
     backup_if_exists "${COMMON_PASSWORD}"
-    backup_if_exists "${COMMON_AUTH}"
-    backup_if_exists "${COMMON_ACCOUNT}"
 
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq libpam-pwquality libpam-modules
 
-    [[ -f "${COMMON_PASSWORD}" ]] || fail "${COMMON_PASSWORD} not found."
-    [[ -f "${COMMON_AUTH}" ]] || fail "${COMMON_AUTH} not found."
-    [[ -f "${COMMON_ACCOUNT}" ]] || fail "${COMMON_ACCOUNT} not found."
+    [[ -f "${COMMON_PASSWORD}" ]] ||
+        fail "${COMMON_PASSWORD} not found."
 else
     SYSTEM_AUTH="/etc/pam.d/system-auth"
     PASSWORD_AUTH="/etc/pam.d/password-auth"
@@ -126,25 +139,29 @@ else
         fail "authselect not found."
 
     authselect check >/dev/null 2>&1 ||
-        fail "Current authselect configuration is invalid. Fix it before applying this policy."
+        fail "Current authselect configuration is invalid."
 
     authselect current >/dev/null 2>&1 ||
         fail "No active authselect profile found."
 fi
 
-# Password complexity
-set_eq_value "${PWQUALITY}" "minlen" "12"
+# Password complexity.
+set_eq_value "${PWQUALITY}" "minlen" "${MINLEN}"
 set_eq_value "${PWQUALITY}" "dcredit" "-1"
 set_eq_value "${PWQUALITY}" "ucredit" "-1"
 set_eq_value "${PWQUALITY}" "lcredit" "-1"
-set_eq_value "${PWQUALITY}" "ocredit" "0"
+set_eq_value "${PWQUALITY}" "ocredit" "-1"
 set_eq_value "${PWQUALITY}" "enforcing" "1"
 
-# Password history
+# Password history.
 if [[ "${FAMILY}" == "debian" ]]; then
-    if ! grep -Eq '^[[:space:]]*password[[:space:]].*pam_pwquality\.so' "${COMMON_PASSWORD}"; then
+    if grep -Eq '^[[:space:]]*password[[:space:]].*pam_pwquality\.so' "${COMMON_PASSWORD}"; then
+        sed -Ei \
+            's|^[[:space:]]*password[[:space:]].*pam_pwquality\.so.*$|password        requisite                       pam_pwquality.so retry=5|' \
+            "${COMMON_PASSWORD}"
+    else
         sed -i \
-            '/^[[:space:]]*password[[:space:]].*pam_unix\.so/i password        requisite                       pam_pwquality.so retry=3' \
+            '/^[[:space:]]*password[[:space:]].*pam_unix\.so/i password        requisite                       pam_pwquality.so retry=5' \
             "${COMMON_PASSWORD}"
     fi
 
@@ -163,13 +180,16 @@ else
     if ! authselect current | grep -qw 'with-pwhistory'; then
         authselect enable-feature with-pwhistory -b >/dev/null
     fi
+
+    authselect apply-changes >/dev/null
 fi
 
-# Password never expires
-set_space_value "${LOGIN_DEFS}" "PASS_MAX_DAYS" "-1"
-set_space_value "${LOGIN_DEFS}" "PASS_MIN_DAYS" "0"
-set_space_value "${LOGIN_DEFS}" "PASS_WARN_AGE" "-1"
+# Password expiration defaults for newly created users.
+set_space_value "${LOGIN_DEFS}" "PASS_MAX_DAYS" "${PASS_MAX_DAYS}"
+set_space_value "${LOGIN_DEFS}" "PASS_MIN_DAYS" "${PASS_MIN_DAYS}"
+set_space_value "${LOGIN_DEFS}" "PASS_WARN_AGE" "${PASS_WARN_AGE}"
 
+# Apply expiration policy to existing interactive users.
 UID_MIN="$(awk '$1=="UID_MIN"{print $2; exit}' "${LOGIN_DEFS}")"
 UID_MIN="${UID_MIN:-1000}"
 
@@ -178,54 +198,53 @@ while IFS=: read -r username _ uid _ _ _ shell; do
           "${username}" != "nobody" &&
           "${shell}" != */nologin &&
           "${shell}" != */false ]]; then
-        chage -M -1 -m 0 -W -1 "${username}"
-        log "Password expiration disabled: ${username}"
+
+        chage \
+            -M "${PASS_MAX_DAYS}" \
+            -m "${PASS_MIN_DAYS}" \
+            -W "${PASS_WARN_AGE}" \
+            "${username}"
+
+        log "Password expiration policy applied: ${username}"
     fi
 done < /etc/passwd
 
-# Temporary login ban: default 5 failures, then 10 minutes.
-set_eq_value "${FAILLOCK}" "deny" "${LOCKOUT_DENY}"
-set_eq_value "${FAILLOCK}" "fail_interval" "${FAIL_INTERVAL}"
-set_eq_value "${FAILLOCK}" "unlock_time" "${LOCKOUT_TIME}"
-
-if [[ "${FAMILY}" == "debian" ]]; then
-    sed -i '/pam_faillock\.so/d' "${COMMON_AUTH}"
-
-    sed -i \
-        '/^[[:space:]]*auth[[:space:]].*pam_unix\.so/i auth    required                        pam_faillock.so preauth silent' \
-        "${COMMON_AUTH}"
-
-    sed -i \
-        '/^[[:space:]]*auth[[:space:]].*pam_unix\.so/a auth    [default=die]                   pam_faillock.so authfail\nauth    sufficient                      pam_faillock.so authsucc' \
-        "${COMMON_AUTH}"
-
-    sed -i '/pam_faillock\.so/d' "${COMMON_ACCOUNT}"
-    printf '\n# Temporary login ban policy\naccount required pam_faillock.so\n' >> "${COMMON_ACCOUNT}"
-else
-    if ! authselect current | grep -qw 'with-faillock'; then
-        authselect enable-feature with-faillock -b >/dev/null
-    fi
-    authselect apply-changes >/dev/null
-fi
-
-# Basic validation
-grep -Eq '^minlen[[:space:]]*=[[:space:]]*12' "${PWQUALITY}" ||
+# Validation.
+grep -Eq "^minlen[[:space:]]*=[[:space:]]*${MINLEN}[[:space:]]*$" "${PWQUALITY}" ||
     fail "Password minimum length validation failed."
 
+grep -Eq '^dcredit[[:space:]]*=[[:space:]]*-1[[:space:]]*$' "${PWQUALITY}" ||
+    fail "Digit requirement validation failed."
+
+grep -Eq '^ucredit[[:space:]]*=[[:space:]]*-1[[:space:]]*$' "${PWQUALITY}" ||
+    fail "Uppercase requirement validation failed."
+
+grep -Eq '^lcredit[[:space:]]*=[[:space:]]*-1[[:space:]]*$' "${PWQUALITY}" ||
+    fail "Lowercase requirement validation failed."
+
+grep -Eq '^ocredit[[:space:]]*=[[:space:]]*-1[[:space:]]*$' "${PWQUALITY}" ||
+    fail "Special-character requirement validation failed."
+
 if [[ "${FAMILY}" == "debian" ]]; then
+    grep -Eq 'pam_pwquality\.so[[:space:]]+retry=5' "${COMMON_PASSWORD}" ||
+        fail "pam_pwquality retry=5 validation failed."
+
     grep -Eq 'pam_pwhistory\.so.*remember=5' "${COMMON_PASSWORD}" ||
         fail "Password history validation failed."
-    grep -Eq 'pam_faillock\.so[[:space:]]+authfail' "${COMMON_AUTH}" ||
-        fail "PAM faillock validation failed."
 else
     authselect check >/dev/null 2>&1 ||
         fail "authselect validation failed."
+
+    authselect current | grep -qw 'with-pwhistory' ||
+        fail "authselect with-pwhistory is not enabled."
+
     grep -Eq 'pam_pwhistory\.so' "${SYSTEM_AUTH}" ||
         fail "pam_pwhistory is not active in system-auth."
-    grep -Eq 'pam_faillock\.so' "${SYSTEM_AUTH}" ||
-        fail "pam_faillock is not active in system-auth."
+
+    grep -Eq 'pam_pwhistory\.so' "${PASSWORD_AUTH}" ||
+        fail "pam_pwhistory is not active in password-auth."
 fi
 
 log "Backup location: ${BACKUP_DIR}"
 log "=== Password Policy Applied Successfully ==="
-log "Run password_policy_verifikasi.sh to verify."
+log "Policy: minlen=${MINLEN}, history=${HISTORY}, expiry=${PASS_MAX_DAYS}/${PASS_MIN_DAYS}/${PASS_WARN_AGE}."
