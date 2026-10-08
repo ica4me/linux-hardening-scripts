@@ -96,7 +96,6 @@ for option in nodev nosuid noexec; do
     fi
 done
 
-
 if findmnt --verify --tab-file "${FSTAB}" >/dev/null 2>&1; then
     pass "/etc/fstab syntax valid"
 else
