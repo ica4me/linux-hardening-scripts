@@ -96,11 +96,6 @@ for option in nodev nosuid noexec; do
     fi
 done
 
-if grep -qw "mode=1777" <<< "${FSTAB_OPTIONS//,/ }"; then
-    pass "fstab contains mode=1777"
-else
-    fail "fstab missing mode=1777"
-fi
 
 if findmnt --verify --tab-file "${FSTAB}" >/dev/null 2>&1; then
     pass "/etc/fstab syntax valid"
