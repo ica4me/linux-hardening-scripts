@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Cross-platform SSH/session policy.
-# Supported: Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
-# This script modifies only /etc/ssh/sshd_config and the TMOUT profile.
-# It does NOT create, delete, or modify files in /etc/ssh/sshd_config.d/.
+# Ubuntu 22.04 LTS SSH hardening.
+# Modifies ONLY /etc/ssh/sshd_config.
+# Does NOT modify /etc/ssh/sshd_config.d/.
+# Banner is intentionally not configured (N/A).
+# Ubuntu 22.04/OpenSSH 8.9 uses SSH protocol 2 only, so the legacy
+# "Protocol 2" directive is intentionally not added.
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
-TIMEOUT_FILE="/etc/profile.d/99-session-timeout.sh"
-
-CLIENT_ALIVE_INTERVAL="${CLIENT_ALIVE_INTERVAL:-300}"
-CLIENT_ALIVE_COUNT_MAX="${CLIENT_ALIVE_COUNT_MAX:-3}"
-SESSION_TIMEOUT="${SESSION_TIMEOUT:-900}"
-
-BACKUP_ROOT="/var/backups/session-timeout"
+BACKUP_ROOT="/var/backups/ssh-hardening"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
 
@@ -27,121 +23,131 @@ fail() { echo "[ERROR] $*" >&2; exit 1; }
 # shellcheck disable=SC1091
 . /etc/os-release
 
-OS_ID="${ID,,}"
-OS_VER="${VERSION_ID:-unknown}"
-OS_MAJOR="${OS_VER%%.*}"
-
-case "${OS_ID}" in
-    ubuntu)
-        [[ "${OS_VER}" == "22.04" || "${OS_VER}" == "24.04" ]] ||
-            fail "Unsupported Ubuntu version: ${OS_VER}"
-        SSH_SERVICE="ssh"
-        ;;
-    debian)
-        [[ "${OS_MAJOR}" == "12" || "${OS_MAJOR}" == "13" ]] ||
-            fail "Unsupported Debian version: ${OS_VER}"
-        SSH_SERVICE="ssh"
-        ;;
-    rhel)
-        [[ "${OS_MAJOR}" == "9" || "${OS_MAJOR}" == "10" ]] ||
-            fail "Unsupported RHEL version: ${OS_VER}"
-        SSH_SERVICE="sshd"
-        ;;
-    *)
-        fail "Unsupported OS: ${PRETTY_NAME:-${OS_ID}}"
-        ;;
-esac
+[[ "${ID,,}" == "ubuntu" ]] || fail "Unsupported OS: ${PRETTY_NAME:-${ID}}"
+[[ "${VERSION_ID:-}" == "22.04" ]] || fail "This script is intended for Ubuntu 22.04 LTS. Detected: ${PRETTY_NAME:-unknown}"
 
 SSHD_BIN="$(command -v sshd || true)"
 [[ -n "${SSHD_BIN}" ]] || SSHD_BIN="/usr/sbin/sshd"
 [[ -x "${SSHD_BIN}" ]] || fail "sshd binary not found."
 
-log "Detected OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
-log "=== Applying SSH & Session Timeout Policy ==="
+log "Detected OS: ${PRETTY_NAME}"
+log "=== Applying SSH hardening directly to ${SSHD_CONFIG} ==="
 
 mkdir -p "${BACKUP_DIR}"
 cp -a "${SSHD_CONFIG}" "${BACKUP_DIR}/sshd_config"
+log "Backup created: ${BACKUP_DIR}/sshd_config"
 
-[[ -f "${TIMEOUT_FILE}" ]] &&
-    cp -a "${TIMEOUT_FILE}" "${BACKUP_DIR}/99-session-timeout.sh"
+# Secure ownership and permissions.
+chown root:root "${SSHD_CONFIG}"
+chmod og-rwx "${SSHD_CONFIG}"
 
-log "Backup created: ${BACKUP_DIR}"
+# Remove obsolete Protocol directives if present.
+sed -Ei '/^[[:space:]]*Protocol[[:space:]]+/d' "${SSHD_CONFIG}"
 
-set_sshd_value() {
-    local key="$1"
-    local value="$2"
+MANAGED_KEYS='Ciphers|MACs|KexAlgorithms|LogLevel|LoginGraceTime|PermitRootLogin|MaxAuthTries|PermitEmptyPasswords|AllowTcpForwarding|X11Forwarding|ClientAliveInterval|ClientAliveCountMax|MaxStartups'
+TMP="$(mktemp)"
+trap 'rm -f "${TMP}" "${TMP}.new"' EXIT
 
-    if grep -Eq "^[[:space:]#]*${key}[[:space:]]+" "${SSHD_CONFIG}"; then
-        sed -Ei \
-            "0,/^[[:space:]#]*${key}[[:space:]]+.*/s||${key} ${value}|" \
-            "${SSHD_CONFIG}"
-
-        # Remove duplicate active occurrences after the first one.
-        awk -v k="${key}" -v v="${value}" '
-            BEGIN { seen=0 }
-            {
-                if ($1 == k) {
-                    if (seen == 0) {
-                        print k " " v
-                        seen=1
-                    }
-                    next
-                }
-                print
-            }
-        ' "${SSHD_CONFIG}" > "${SSHD_CONFIG}.tmp"
-
-        mv "${SSHD_CONFIG}.tmp" "${SSHD_CONFIG}"
-    else
-        printf '\n%s %s\n' "${key}" "${value}" >> "${SSHD_CONFIG}"
-    fi
+# Remove active global occurrences of managed directives before the first Match block.
+awk -v keys="${MANAGED_KEYS}" '
+BEGIN {
+    n=split(keys,a,"|")
+    for (i=1;i<=n;i++) managed[a[i]]=1
 }
+{
+    line=$0
+    if (line ~ /^[[:space:]]*Match[[:space:]]+/) in_match=1
+    if (!in_match) {
+        stripped=line
+        sub(/^[[:space:]]+/, "", stripped)
+        split(stripped, f, /[[:space:]]+/)
+        if (f[1] in managed) next
+    }
+    print line
+}
+' "${SSHD_CONFIG}" > "${TMP}"
 
-# Main SSH policy.
-set_sshd_value "PasswordAuthentication" "no"
-set_sshd_value "PermitRootLogin" "prohibit-password"
-set_sshd_value "KbdInteractiveAuthentication" "no"
-set_sshd_value "ClientAliveInterval" "${CLIENT_ALIVE_INTERVAL}"
-set_sshd_value "ClientAliveCountMax" "${CLIENT_ALIVE_COUNT_MAX}"
+# Insert the hardening policy in global context, before the first Match block.
+awk '
+BEGIN { inserted=0 }
+function policy() {
+    print ""
+    print "# BEGIN MANAGED SSH HARDENING - Ubuntu 22.04"
+    print "Ciphers aes128-ctr,aes192-ctr,aes256-ctr"
+    print "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    print "KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256"
+    print "LogLevel VERBOSE"
+    print "LoginGraceTime 60"
+    print "PermitRootLogin prohibit-password"
+    print "MaxAuthTries 4"
+    print "PermitEmptyPasswords no"
+    print "AllowTcpForwarding no"
+    print "X11Forwarding no"
+    print "ClientAliveInterval 300"
+    print "ClientAliveCountMax 3"
+    print "MaxStartups 10:30:60"
+    print "# END MANAGED SSH HARDENING"
+    print ""
+}
+{
+    if (!inserted && $0 ~ /^[[:space:]]*Match[[:space:]]+/) {
+        policy()
+        inserted=1
+    }
+    print
+}
+END {
+    if (!inserted) policy()
+}
+' "${TMP}" > "${TMP}.new"
 
-# Interactive shell idle timeout.
-cat > "${TIMEOUT_FILE}" <<EOF
-# Interactive shell idle timeout
-TMOUT=${SESSION_TIMEOUT}
-readonly TMOUT
-export TMOUT
-EOF
+cat "${TMP}.new" > "${SSHD_CONFIG}"
 
-chown root:root "${SSHD_CONFIG}" "${TIMEOUT_FILE}"
-chmod 0600 "${SSHD_CONFIG}"
-chmod 0644 "${TIMEOUT_FILE}"
+chown root:root "${SSHD_CONFIG}"
+chmod 600 "${SSHD_CONFIG}"
 
-# Validate before reload.
-"${SSHD_BIN}" -t || fail "SSH configuration validation failed."
+OWNER="$(stat -c '%U:%G' "${SSHD_CONFIG}")"
+MODE="$(stat -c '%a' "${SSHD_CONFIG}")"
+[[ "${OWNER}" == "root:root" ]] || fail "Ownership validation failed: ${OWNER}"
+[[ "${MODE}" == "600" ]] || fail "Permission validation failed: ${MODE}"
+
+# Validate syntax before reload.
+"${SSHD_BIN}" -t || fail "sshd configuration syntax validation failed. SSH service was NOT reloaded."
 
 EFFECTIVE="$("${SSHD_BIN}" -T 2>/dev/null)"
 
-grep -Eq '^passwordauthentication no$' <<< "${EFFECTIVE}" ||
-    fail "Effective PasswordAuthentication is not 'no'. Check existing sshd_config.d files."
+check_effective() {
+    local regex="$1"
+    local description="$2"
+    grep -Eq "${regex}" <<< "${EFFECTIVE}" || fail "Effective ${description} does not match. Check existing /etc/ssh/sshd_config.d/*.conf."
+    log "Effective ${description}: OK"
+}
 
-grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<< "${EFFECTIVE}" ||
-    fail "Effective PermitRootLogin is not 'prohibit-password'. Check existing sshd_config.d files."
+check_effective '^ciphers aes128-ctr,aes192-ctr,aes256-ctr$' "Ciphers"
+check_effective '^macs hmac-sha2-512-etm@openssh\.com,hmac-sha2-256-etm@openssh\.com,hmac-sha2-512,hmac-sha2-256$' "MACs"
+check_effective '^kexalgorithms curve25519-sha256@libssh\.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256$' "KexAlgorithms"
+check_effective '^loglevel verbose$' "LogLevel"
+check_effective '^logingracetime 60$' "LoginGraceTime"
+check_effective '^permitrootlogin (prohibit-password|without-password)$' "PermitRootLogin"
+check_effective '^maxauthtries 4$' "MaxAuthTries"
+check_effective '^permitemptypasswords no$' "PermitEmptyPasswords"
+check_effective '^allowtcpforwarding no$' "AllowTcpForwarding"
+check_effective '^x11forwarding no$' "X11Forwarding"
+check_effective '^clientaliveinterval 300$' "ClientAliveInterval"
+check_effective '^clientalivecountmax 3$' "ClientAliveCountMax"
+check_effective '^maxstartups 10:30:60$' "MaxStartups"
 
-grep -Eq '^kbdinteractiveauthentication no$' <<< "${EFFECTIVE}" ||
-    fail "Effective KbdInteractiveAuthentication is not 'no'. Check existing sshd_config.d files."
+systemctl reload ssh || fail "Failed to reload ssh service."
+systemctl is-active --quiet ssh || fail "ssh service is not active after reload."
 
-grep -Eq "^clientaliveinterval ${CLIENT_ALIVE_INTERVAL}$" <<< "${EFFECTIVE}" ||
-    fail "Effective ClientAliveInterval is incorrect. Check existing sshd_config.d files."
-
-grep -Eq "^clientalivecountmax ${CLIENT_ALIVE_COUNT_MAX}$" <<< "${EFFECTIVE}" ||
-    fail "Effective ClientAliveCountMax is incorrect. Check existing sshd_config.d files."
-
-systemctl reload "${SSH_SERVICE}" ||
-    fail "Failed to reload ${SSH_SERVICE}."
-
-systemctl is-active --quiet "${SSH_SERVICE}" ||
-    fail "${SSH_SERVICE} is not active."
-
-log "Backup location: ${BACKUP_DIR}"
-log "=== SSH & Session Timeout Policy Applied Successfully ==="
-log "Run /root/session_timeout_verifikasi.sh"
+echo
+echo "============================================================"
+echo "SSH hardening applied successfully"
+echo "File       : ${SSHD_CONFIG}"
+echo "Owner      : $(stat -c '%U:%G' "${SSHD_CONFIG}")"
+echo "Permission : $(stat -c '%a' "${SSHD_CONFIG}")"
+echo "Backup     : ${BACKUP_DIR}/sshd_config"
+echo "============================================================"
+echo
+echo "[IMPORTANT] Do NOT close the current SSH session yet."
+echo "Open a second terminal and verify that SSH login still works."
