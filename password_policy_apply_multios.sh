@@ -167,11 +167,11 @@ if [[ "${FAMILY}" == "debian" ]]; then
 
     if grep -Eq '^[[:space:]]*password[[:space:]].*pam_pwhistory\.so' "${COMMON_PASSWORD}"; then
         sed -Ei \
-            's|^[[:space:]]*password[[:space:]].*pam_pwhistory\.so.*$|password        required                        pam_pwhistory.so remember=5 use_authtok|' \
+            's|^[[:space:]]*password[[:space:]].*pam_pwhistory\.so.*$|password        required                        pam_pwhistory.so remember=5|' \
             "${COMMON_PASSWORD}"
     else
         sed -i \
-            '/^[[:space:]]*password[[:space:]].*pam_unix\.so/i password        required                        pam_pwhistory.so remember=5 use_authtok' \
+            '/^[[:space:]]*password[[:space:]].*pam_unix\.so/i password        required                        pam_pwhistory.so remember=5' \
             "${COMMON_PASSWORD}"
     fi
 else
