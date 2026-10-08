@@ -2,9 +2,13 @@
 set -u
 
 # Cross-platform auditd verification.
-# Supported: Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
+#
+# Supported:
+# - Ubuntu 22.04 / 24.04
+# - Debian 12 / 13
+# - RHEL 9 / 10.x
 
-RULES_FILE="/etc/audit/rules.d/50-dbalance-hardening.rules"
+RULES_FILE="/etc/audit/rules.d/50-linux-hardening.rules"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -58,6 +62,20 @@ case "${OS_ID}" in
         ;;
 esac
 
+ARCH="$(uname -m)"
+case "${ARCH}" in
+    x86_64|amd64)
+        HAS_B32=1
+        ;;
+    aarch64|arm64)
+        HAS_B32=0
+        ;;
+    *)
+        echo "[FAIL] Unsupported architecture: ${ARCH}"
+        exit 1
+        ;;
+esac
+
 check_package() {
     local package="$1"
 
@@ -82,7 +100,7 @@ check_rule_key() {
 }
 
 echo "==========================================="
-echo " DBalance Cross-Platform Auditd Verification"
+echo " Cross-Platform Auditd Verification"
 echo " OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
 echo "==========================================="
 echo
@@ -116,7 +134,7 @@ echo "--- Audit Status ---"
 
 AUDIT_ENABLED="$(
     auditctl -s 2>/dev/null |
-    awk '$1=="enabled" {print $2}'
+        awk '$1=="enabled" {print $2}'
 )"
 
 if [[ "${AUDIT_ENABLED}" == "1" || "${AUDIT_ENABLED}" == "2" ]]; then
@@ -127,7 +145,7 @@ fi
 
 LOST="$(
     auditctl -s 2>/dev/null |
-    awk '$1=="lost" {print $2}'
+        awk '$1=="lost" {print $2}'
 )"
 
 if [[ "${LOST:-}" =~ ^[0-9]+$ && "${LOST}" -eq 0 ]]; then
@@ -140,8 +158,8 @@ echo
 echo "--- Rules File ---"
 
 [[ -f "${RULES_FILE}" ]] &&
-    pass "DBalance audit rules file exists" ||
-    fail "DBalance audit rules file missing"
+    pass "Audit rules file exists: ${RULES_FILE}" ||
+    fail "Audit rules file missing: ${RULES_FILE}"
 
 OWNER="$(stat -c '%U:%G' "${RULES_FILE}" 2>/dev/null)"
 MODE="$(stat -c '%a' "${RULES_FILE}" 2>/dev/null)"
@@ -153,6 +171,27 @@ MODE="$(stat -c '%a' "${RULES_FILE}" 2>/dev/null)"
 [[ "${MODE}" == "640" ]] &&
     pass "Rules permission = 640" ||
     fail "Rules permission = ${MODE:-UNKNOWN}"
+
+echo
+echo "--- Reference Rule Coverage ---"
+
+grep -Eq -- '-F arch=b64 .*adjtimex.*settimeofday.*-k time-change' "${RULES_FILE}" &&
+    pass "b64 adjtimex/settimeofday rule configured" ||
+    fail "b64 adjtimex/settimeofday rule missing"
+
+grep -Eq -- '-F arch=b64 .*clock_settime.*-k time-change' "${RULES_FILE}" &&
+    pass "b64 clock_settime rule configured" ||
+    fail "b64 clock_settime rule missing"
+
+if (( HAS_B32 == 1 )); then
+    grep -Eq -- '-F arch=b32 .*adjtimex.*settimeofday.*stime.*-k time-change' "${RULES_FILE}" &&
+        pass "b32 adjtimex/settimeofday/stime rule configured" ||
+        fail "b32 adjtimex/settimeofday/stime rule missing"
+
+    grep -Eq -- '-F arch=b32 .*clock_settime.*-k time-change' "${RULES_FILE}" &&
+        pass "b32 clock_settime rule configured" ||
+        fail "b32 clock_settime rule missing"
+fi
 
 echo
 echo "--- Active Audit Rules ---"

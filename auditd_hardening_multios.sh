@@ -2,9 +2,29 @@
 set -Eeuo pipefail
 
 # Cross-platform auditd hardening.
-# Supported: Ubuntu 22.04/24.04, Debian 12/13, RHEL 9/10.x
+#
+# Supported:
+# - Ubuntu 22.04 / 24.04
+# - Debian 12 / 13
+# - RHEL 9 / 10.x
+#
+# This script follows the audit policy reference used for:
+# - time changes
+# - identity changes
+# - system locale / network configuration
+# - MAC policy
+# - login/logout records
+# - session records
+# - permission/ownership changes
+# - denied file access
+# - file deletion/rename
+# - sudoers scope changes
+# - privileged command execution
+#
+# All generated rules are stored in one generic file:
+# /etc/audit/rules.d/50-linux-hardening.rules
 
-RULES_FILE="/etc/audit/rules.d/50-dbalance-hardening.rules"
+RULES_FILE="/etc/audit/rules.d/50-linux-hardening.rules"
 AUDITD_CONF="/etc/audit/auditd.conf"
 
 BACKUP_ROOT="/var/backups/auditd-hardening"
@@ -66,7 +86,7 @@ mkdir -p /etc/audit/rules.d
 mkdir -p "${BACKUP_DIR}"
 
 [[ -f "${RULES_FILE}" ]] &&
-    cp -a "${RULES_FILE}" "${BACKUP_DIR}/50-dbalance-hardening.rules"
+    cp -a "${RULES_FILE}" "${BACKUP_DIR}/50-linux-hardening.rules"
 
 [[ -f "${AUDITD_CONF}" ]] &&
     cp -a "${AUDITD_CONF}" "${BACKUP_DIR}/auditd.conf"
@@ -77,12 +97,13 @@ UID_MIN="$(awk '$1=="UID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null)"
 UID_MIN="${UID_MIN:-1000}"
 
 ARCH="$(uname -m)"
+
 case "${ARCH}" in
     x86_64|amd64)
-        AUDIT_ARCHES=("b64" "b32")
+        HAS_B32=1
         ;;
     aarch64|arm64)
-        AUDIT_ARCHES=("b64")
+        HAS_B32=0
         ;;
     *)
         fail "Unsupported architecture: ${ARCH}"
@@ -92,7 +113,7 @@ esac
 : > "${RULES_FILE}"
 
 cat >> "${RULES_FILE}" <<EOF
-# DBalance cross-platform audit rules
+# Linux cross-platform audit rules
 # OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}
 # UID_MIN: ${UID_MIN}
 
@@ -104,48 +125,94 @@ add_watch() {
     local key="$3"
 
     if [[ -e "${path}" ]]; then
-        printf -- '-w %s -p %s -k %s\n' "${path}" "${perms}" "${key}" >> "${RULES_FILE}"
+        printf -- '-w %s -p %s -k %s\n' \
+            "${path}" "${perms}" "${key}" >> "${RULES_FILE}"
     fi
 }
 
-add_rule_for_arches() {
-    local syscall_list="$1"
-    local extra_filters="$2"
-    local key="$3"
-    local arch
+add_syscall_rule() {
+    local arch="$1"
+    local syscalls="$2"
+    local filters="$3"
+    local key="$4"
 
-    for arch in "${AUDIT_ARCHES[@]}"; do
-        printf -- '-a always,exit -F arch=%s -S %s %s -k %s\n' \
-            "${arch}" "${syscall_list}" "${extra_filters}" "${key}" >> "${RULES_FILE}"
-    done
+    printf -- '-a always,exit -F arch=%s -S %s %s -k %s\n' \
+        "${arch}" "${syscalls}" "${filters}" "${key}" >> "${RULES_FILE}"
 }
 
+# ============================================================
 # Time changes
-add_rule_for_arches "adjtimex,settimeofday,clock_settime" "" "time-change"
+# Reference behavior:
+# b64: adjtimex, settimeofday, clock_settime
+# b32: adjtimex, settimeofday, stime, clock_settime
+# ============================================================
+
+add_syscall_rule "b64" \
+    "adjtimex,settimeofday" \
+    "" \
+    "time-change"
+
+add_syscall_rule "b64" \
+    "clock_settime" \
+    "" \
+    "time-change"
+
+if (( HAS_B32 == 1 )); then
+    add_syscall_rule "b32" \
+        "adjtimex,settimeofday,stime" \
+        "" \
+        "time-change"
+
+    add_syscall_rule "b32" \
+        "clock_settime" \
+        "" \
+        "time-change"
+fi
+
 add_watch "/etc/localtime" "wa" "time-change"
 
+# ============================================================
 # Identity changes
+# ============================================================
+
 add_watch "/etc/group" "wa" "identity"
 add_watch "/etc/passwd" "wa" "identity"
 add_watch "/etc/gshadow" "wa" "identity"
 add_watch "/etc/shadow" "wa" "identity"
 add_watch "/etc/security/opasswd" "wa" "identity"
 
-# System locale and network configuration
-add_rule_for_arches "sethostname,setdomainname" "" "system-locale"
+# ============================================================
+# System locale / hostname / network configuration
+# ============================================================
+
+add_syscall_rule "b64" \
+    "sethostname,setdomainname" \
+    "" \
+    "system-locale"
+
+if (( HAS_B32 == 1 )); then
+    add_syscall_rule "b32" \
+        "sethostname,setdomainname" \
+        "" \
+        "system-locale"
+fi
+
 add_watch "/etc/issue" "wa" "system-locale"
 add_watch "/etc/issue.net" "wa" "system-locale"
 add_watch "/etc/hosts" "wa" "system-locale"
 
 if [[ "${FAMILY}" == "debian" ]]; then
-    add_watch "/etc/netplan" "wa" "system-locale"
     add_watch "/etc/network" "wa" "system-locale"
+    add_watch "/etc/netplan" "wa" "system-locale"
 else
     add_watch "/etc/NetworkManager" "wa" "system-locale"
     add_watch "/etc/sysconfig/network-scripts" "wa" "system-locale"
 fi
 
-# Mandatory access control policy
+# ============================================================
+# Mandatory Access Control policy
+# ============================================================
+
 if [[ "${MAC_TYPE}" == "apparmor" ]]; then
     add_watch "/etc/apparmor" "wa" "MAC-policy"
     add_watch "/etc/apparmor.d" "wa" "MAC-policy"
@@ -153,43 +220,133 @@ else
     add_watch "/etc/selinux" "wa" "MAC-policy"
 fi
 
-# Login records
+# ============================================================
+# Login / logout records
+# ============================================================
+
 add_watch "/var/log/faillog" "wa" "logins"
 add_watch "/var/log/lastlog" "wa" "logins"
 add_watch "/var/log/tallylog" "wa" "logins"
 
+# ============================================================
 # Session records
-add_watch "/run/utmp" "wa" "session"
+# ============================================================
+
 add_watch "/var/run/utmp" "wa" "session"
+
+# On many modern systems /var/run is a symlink to /run.
+# Add /run/utmp as well if it exists separately.
+if [[ -e /run/utmp ]]; then
+    add_watch "/run/utmp" "wa" "session"
+fi
+
 add_watch "/var/log/wtmp" "wa" "logins"
 add_watch "/var/log/btmp" "wa" "logins"
 
-# Permission/ownership changes
+# ============================================================
+# Permission / ownership changes
+# ============================================================
+
 FILTER="-F auid>=${UID_MIN} -F auid!=4294967295"
-add_rule_for_arches "chmod,fchmod,fchmodat" "${FILTER}" "perm_mod"
-add_rule_for_arches "chown,fchown,fchownat,lchown" "${FILTER}" "perm_mod"
-add_rule_for_arches "setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr" "${FILTER}" "perm_mod"
 
+add_syscall_rule "b64" \
+    "chmod,fchmod,fchmodat" \
+    "${FILTER}" \
+    "perm_mod"
+
+add_syscall_rule "b64" \
+    "chown,fchown,fchownat,lchown" \
+    "${FILTER}" \
+    "perm_mod"
+
+add_syscall_rule "b64" \
+    "setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr" \
+    "${FILTER}" \
+    "perm_mod"
+
+if (( HAS_B32 == 1 )); then
+    add_syscall_rule "b32" \
+        "chmod,fchmod,fchmodat" \
+        "${FILTER}" \
+        "perm_mod"
+
+    add_syscall_rule "b32" \
+        "chown,fchown,fchownat,lchown" \
+        "${FILTER}" \
+        "perm_mod"
+
+    add_syscall_rule "b32" \
+        "setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr" \
+        "${FILTER}" \
+        "perm_mod"
+fi
+
+# ============================================================
 # Unauthorized file access
-add_rule_for_arches "creat,open,openat,truncate,ftruncate" "-F exit=-EACCES ${FILTER}" "access"
-add_rule_for_arches "creat,open,openat,truncate,ftruncate" "-F exit=-EPERM ${FILTER}" "access"
+# ============================================================
 
+add_syscall_rule "b64" \
+    "creat,open,openat,truncate,ftruncate" \
+    "-F exit=-EACCES ${FILTER}" \
+    "access"
+
+add_syscall_rule "b64" \
+    "creat,open,openat,truncate,ftruncate" \
+    "-F exit=-EPERM ${FILTER}" \
+    "access"
+
+if (( HAS_B32 == 1 )); then
+    add_syscall_rule "b32" \
+        "creat,open,openat,truncate,ftruncate" \
+        "-F exit=-EACCES ${FILTER}" \
+        "access"
+
+    add_syscall_rule "b32" \
+        "creat,open,openat,truncate,ftruncate" \
+        "-F exit=-EPERM ${FILTER}" \
+        "access"
+fi
+
+# ============================================================
 # File deletion and rename
-add_rule_for_arches "unlink,unlinkat,rename,renameat" "${FILTER}" "delete"
+# ============================================================
 
-# Sudo configuration
+add_syscall_rule "b64" \
+    "unlink,unlinkat,rename,renameat" \
+    "${FILTER}" \
+    "delete"
+
+if (( HAS_B32 == 1 )); then
+    add_syscall_rule "b32" \
+        "unlink,unlinkat,rename,renameat" \
+        "${FILTER}" \
+        "delete"
+fi
+
+# ============================================================
+# System administration scope changes
+# ============================================================
+
 add_watch "/etc/sudoers" "wa" "scope"
 add_watch "/etc/sudoers.d" "wa" "scope"
 
-# Privileged commands
-for arch in "${AUDIT_ARCHES[@]}"; do
-    printf -- '-a always,exit -F arch=%s -C euid!=uid -F euid=0 -F auid>=%s -F auid!=4294967295 -S execve -k actions\n' \
-        "${arch}" "${UID_MIN}" >> "${RULES_FILE}"
-done
+# ============================================================
+# Privileged commands / sudo actions
+# ============================================================
 
+printf -- '-a always,exit -F arch=b64 -C euid!=uid -F euid=0 -F auid>=%s -F auid!=4294967295 -S execve -k actions\n' \
+    "${UID_MIN}" >> "${RULES_FILE}"
+
+if (( HAS_B32 == 1 )); then
+    printf -- '-a always,exit -F arch=b32 -C euid!=uid -F euid=0 -F auid>=%s -F auid!=4294967295 -S execve -k actions\n' \
+        "${UID_MIN}" >> "${RULES_FILE}"
+fi
+
+# Secure rules file.
 chown root:root "${RULES_FILE}"
 chmod 0640 "${RULES_FILE}"
 
+# Validate and load rules.
 augenrules --check >/dev/null ||
     fail "Audit rule validation failed."
 
@@ -203,5 +360,5 @@ systemctl is-active --quiet auditd ||
     fail "auditd is not active."
 
 log "Backup location: ${BACKUP_DIR}"
+log "Rules file: ${RULES_FILE}"
 log "=== Auditd Hardening Applied Successfully ==="
-log "Run /root/auditd_verifikasi.sh"
