@@ -7,8 +7,24 @@ set -u
 # - Ubuntu 22.04 / 24.04
 # - Debian 12 / 13
 # - RHEL 9 / 10.x
+#
+# Verifies the separate rule-file layout used by the reference policy.
 
-RULES_FILE="/etc/audit/rules.d/50-linux-hardening.rules"
+RULES_DIR="/etc/audit/rules.d"
+
+EXPECTED_FILES=(
+    "50-time-change.rules"
+    "50-identity.rules"
+    "50-system-locale.rules"
+    "50-MAC-policy.rules"
+    "50-logins.rules"
+    "50-session.rules"
+    "50-perm_mod.rules"
+    "50-access.rules"
+    "50-delete.rules"
+    "50-scope.rules"
+    "50-actions.rules"
+)
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -35,8 +51,9 @@ case "${OS_ID}" in
             exit 1
         }
         FAMILY="debian"
-        EXPECTED_PACKAGE_1="auditd"
-        EXPECTED_PACKAGE_2="audispd-plugins"
+        MAC_TYPE="apparmor"
+        PACKAGE_1="auditd"
+        PACKAGE_2="audispd-plugins"
         ;;
     debian)
         [[ "${OS_MAJOR}" == "12" || "${OS_MAJOR}" == "13" ]] || {
@@ -44,8 +61,9 @@ case "${OS_ID}" in
             exit 1
         }
         FAMILY="debian"
-        EXPECTED_PACKAGE_1="auditd"
-        EXPECTED_PACKAGE_2="audispd-plugins"
+        MAC_TYPE="apparmor"
+        PACKAGE_1="auditd"
+        PACKAGE_2="audispd-plugins"
         ;;
     rhel)
         [[ "${OS_MAJOR}" == "9" || "${OS_MAJOR}" == "10" ]] || {
@@ -53,8 +71,9 @@ case "${OS_ID}" in
             exit 1
         }
         FAMILY="rhel"
-        EXPECTED_PACKAGE_1="audit"
-        EXPECTED_PACKAGE_2="audispd-plugins"
+        MAC_TYPE="selinux"
+        PACKAGE_1="audit"
+        PACKAGE_2="audispd-plugins"
         ;;
     *)
         echo "[FAIL] Unsupported OS: ${PRETTY_NAME:-${OS_ID}}"
@@ -78,7 +97,6 @@ esac
 
 check_package() {
     local package="$1"
-
     if [[ "${FAMILY}" == "debian" ]]; then
         dpkg-query -W -f='${Status}' "${package}" 2>/dev/null |
             grep -q "install ok installed"
@@ -87,33 +105,42 @@ check_package() {
     fi
 }
 
-check_rule_key() {
+check_active_key() {
     local key="$1"
-
-    if auditctl -l 2>/dev/null |
-        grep -Eq "key=${key}|-k[[:space:]]+${key}"
-    then
+    if auditctl -l 2>/dev/null | grep -Eq "key=${key}|-k[[:space:]]+${key}"; then
         pass "Audit key active: ${key}"
     else
         fail "Audit key inactive: ${key}"
     fi
 }
 
-echo "==========================================="
+check_line() {
+    local file="$1"
+    local pattern="$2"
+    local description="$3"
+
+    if grep -Fqx -- "${pattern}" "${file}" 2>/dev/null; then
+        pass "${description}"
+    else
+        fail "${description}"
+    fi
+}
+
+echo "============================================================"
 echo " Cross-Platform Auditd Verification"
 echo " OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
-echo "==========================================="
+echo "============================================================"
 echo
 
 echo "--- Packages ---"
 
-check_package "${EXPECTED_PACKAGE_1}" &&
-    pass "${EXPECTED_PACKAGE_1} installed" ||
-    fail "${EXPECTED_PACKAGE_1} not installed"
+check_package "${PACKAGE_1}" &&
+    pass "${PACKAGE_1} installed" ||
+    fail "${PACKAGE_1} not installed"
 
-check_package "${EXPECTED_PACKAGE_2}" &&
-    pass "${EXPECTED_PACKAGE_2} installed" ||
-    fail "${EXPECTED_PACKAGE_2} not installed"
+check_package "${PACKAGE_2}" &&
+    pass "${PACKAGE_2} installed" ||
+    fail "${PACKAGE_2} not installed"
 
 echo
 echo "--- Service ---"
@@ -132,22 +159,14 @@ fi
 echo
 echo "--- Audit Status ---"
 
-AUDIT_ENABLED="$(
-    auditctl -s 2>/dev/null |
-        awk '$1=="enabled" {print $2}'
-)"
-
+AUDIT_ENABLED="$(auditctl -s 2>/dev/null | awk '$1=="enabled"{print $2; exit}')"
 if [[ "${AUDIT_ENABLED}" == "1" || "${AUDIT_ENABLED}" == "2" ]]; then
-    pass "Kernel auditing enabled"
+    pass "Kernel auditing enabled = ${AUDIT_ENABLED}"
 else
-    fail "Kernel auditing disabled"
+    fail "Kernel auditing disabled or unavailable"
 fi
 
-LOST="$(
-    auditctl -s 2>/dev/null |
-        awk '$1=="lost" {print $2}'
-)"
-
+LOST="$(auditctl -s 2>/dev/null | awk '$1=="lost"{print $2; exit}')"
 if [[ "${LOST:-}" =~ ^[0-9]+$ && "${LOST}" -eq 0 ]]; then
     pass "Audit lost events = 0"
 else
@@ -155,105 +174,165 @@ else
 fi
 
 echo
-echo "--- Rules File ---"
+echo "--- Managed Rule Files ---"
 
-[[ -f "${RULES_FILE}" ]] &&
-    pass "Audit rules file exists: ${RULES_FILE}" ||
-    fail "Audit rules file missing: ${RULES_FILE}"
+for file in "${EXPECTED_FILES[@]}"; do
+    path="${RULES_DIR}/${file}"
 
-OWNER="$(stat -c '%U:%G' "${RULES_FILE}" 2>/dev/null)"
-MODE="$(stat -c '%a' "${RULES_FILE}" 2>/dev/null)"
+    if [[ -f "${path}" ]]; then
+        pass "${file} exists"
 
-[[ "${OWNER}" == "root:root" ]] &&
-    pass "Rules owner = root:root" ||
-    fail "Rules owner = ${OWNER:-UNKNOWN}"
+        OWNER="$(stat -c '%U:%G' "${path}" 2>/dev/null)"
+        MODE="$(stat -c '%a' "${path}" 2>/dev/null)"
 
-[[ "${MODE}" == "640" ]] &&
-    pass "Rules permission = 640" ||
-    fail "Rules permission = ${MODE:-UNKNOWN}"
+        [[ "${OWNER}" == "root:root" ]] &&
+            pass "${file} owner = root:root" ||
+            fail "${file} owner = ${OWNER:-UNKNOWN}"
+
+        [[ "${MODE}" == "640" ]] &&
+            pass "${file} permission = 640" ||
+            fail "${file} permission = ${MODE:-UNKNOWN}"
+    else
+        fail "${file} missing"
+    fi
+done
 
 echo
-echo "--- Reference Rule Coverage ---"
+echo "--- Time Change Rules ---"
 
-grep -Eq -- '-F arch=b64 .*adjtimex.*settimeofday.*-k time-change' "${RULES_FILE}" &&
-    pass "b64 adjtimex/settimeofday rule configured" ||
-    fail "b64 adjtimex/settimeofday rule missing"
+TIME="${RULES_DIR}/50-time-change.rules"
 
-grep -Eq -- '-F arch=b64 .*clock_settime.*-k time-change' "${RULES_FILE}" &&
-    pass "b64 clock_settime rule configured" ||
-    fail "b64 clock_settime rule missing"
+check_line "${TIME}" \
+    "-a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change" \
+    "b64 adjtimex/settimeofday configured"
+
+check_line "${TIME}" \
+    "-a always,exit -F arch=b64 -S clock_settime -k time-change" \
+    "b64 clock_settime configured"
 
 if (( HAS_B32 == 1 )); then
-    grep -Eq -- '-F arch=b32 .*adjtimex.*settimeofday.*stime.*-k time-change' "${RULES_FILE}" &&
-        pass "b32 adjtimex/settimeofday/stime rule configured" ||
-        fail "b32 adjtimex/settimeofday/stime rule missing"
+    check_line "${TIME}" \
+        "-a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change" \
+        "b32 adjtimex/settimeofday/stime configured"
 
-    grep -Eq -- '-F arch=b32 .*clock_settime.*-k time-change' "${RULES_FILE}" &&
-        pass "b32 clock_settime rule configured" ||
-        fail "b32 clock_settime rule missing"
+    check_line "${TIME}" \
+        "-a always,exit -F arch=b32 -S clock_settime -k time-change" \
+        "b32 clock_settime configured"
+fi
+
+check_line "${TIME}" \
+    "-w /etc/localtime -p wa -k time-change" \
+    "/etc/localtime watch configured"
+
+echo
+echo "--- Identity Rules ---"
+
+IDENTITY="${RULES_DIR}/50-identity.rules"
+for path in /etc/group /etc/passwd /etc/gshadow /etc/shadow /etc/security/opasswd; do
+    check_line "${IDENTITY}" "-w ${path} -p wa -k identity" "${path} identity watch configured"
+done
+
+echo
+echo "--- System Locale Rules ---"
+
+LOCALE="${RULES_DIR}/50-system-locale.rules"
+
+check_line "${LOCALE}" \
+    "-a always,exit -F arch=b64 -S sethostname -S setdomainname -k system-locale" \
+    "b64 hostname/domain rule configured"
+
+if (( HAS_B32 == 1 )); then
+    check_line "${LOCALE}" \
+        "-a always,exit -F arch=b32 -S sethostname -S setdomainname -k system-locale" \
+        "b32 hostname/domain rule configured"
+fi
+
+for path in /etc/issue /etc/issue.net /etc/hosts; do
+    check_line "${LOCALE}" "-w ${path} -p wa -k system-locale" "${path} system-locale watch configured"
+done
+
+if [[ -e /etc/network ]]; then
+    check_line "${LOCALE}" "-w /etc/network -p wa -k system-locale" "/etc/network watch configured"
 fi
 
 echo
-echo "--- Active Audit Rules ---"
+echo "--- MAC Policy Rules ---"
 
-check_rule_key "time-change"
-check_rule_key "identity"
-check_rule_key "system-locale"
-check_rule_key "MAC-policy"
-check_rule_key "logins"
-check_rule_key "session"
-check_rule_key "perm_mod"
-check_rule_key "access"
-check_rule_key "delete"
-check_rule_key "scope"
-check_rule_key "actions"
+MAC="${RULES_DIR}/50-MAC-policy.rules"
+
+if [[ "${MAC_TYPE}" == "apparmor" ]]; then
+    check_line "${MAC}" "-w /etc/apparmor/ -p wa -k MAC-policy" "/etc/apparmor watch configured"
+    check_line "${MAC}" "-w /etc/apparmor.d/ -p wa -k MAC-policy" "/etc/apparmor.d watch configured"
+else
+    check_line "${MAC}" "-w /etc/selinux/ -p wa -k MAC-policy" "/etc/selinux watch configured"
+fi
+
+echo
+echo "--- Login and Session Rules ---"
+
+LOGINS="${RULES_DIR}/50-logins.rules"
+SESSION="${RULES_DIR}/50-session.rules"
+
+for path in /var/log/faillog /var/log/lastlog /var/log/tallylog; do
+    check_line "${LOGINS}" "-w ${path} -p wa -k logins" "${path} login watch configured"
+done
+
+check_line "${SESSION}" "-w /var/run/utmp -p wa -k session" "/var/run/utmp session watch configured"
+check_line "${SESSION}" "-w /var/log/wtmp -p wa -k logins" "/var/log/wtmp watch configured"
+check_line "${SESSION}" "-w /var/log/btmp -p wa -k logins" "/var/log/btmp watch configured"
+
+echo
+echo "--- Active Audit Keys ---"
+
+for key in time-change identity system-locale MAC-policy logins session perm_mod access delete scope actions; do
+    check_active_key "${key}"
+done
 
 echo
 echo "--- Rule Compilation ---"
 
 if augenrules --check >/dev/null 2>&1; then
-    pass "Audit rules syntax valid"
+    pass "Audit rules compilation valid"
 else
-    fail "Audit rules syntax invalid"
+    fail "Audit rules compilation invalid"
 fi
 
 echo
-echo "--- Audit Log ---"
+echo "--- Legacy Aggregate Rules ---"
 
-if [[ -f /var/log/audit/audit.log ]]; then
-    pass "/var/log/audit/audit.log exists"
+if [[ ! -e "${RULES_DIR}/50-linux-hardening.rules" &&
+      ! -e "${RULES_DIR}/50-dbalance-hardening.rules" ]]; then
+    pass "Legacy aggregate rule files are absent"
 else
+    fail "Legacy aggregate rule file still exists and may cause duplicate rules"
+fi
+
+echo
+echo "--- Audit Log and Tools ---"
+
+[[ -f /var/log/audit/audit.log ]] &&
+    pass "/var/log/audit/audit.log exists" ||
     fail "/var/log/audit/audit.log missing"
-fi
+
+for tool in auditctl ausearch augenrules; do
+    command -v "${tool}" >/dev/null 2>&1 &&
+        pass "${tool} available" ||
+        fail "${tool} not found"
+done
 
 echo
-echo "--- Tools ---"
-
-command -v auditctl >/dev/null 2>&1 &&
-    pass "auditctl available" ||
-    fail "auditctl not found"
-
-command -v ausearch >/dev/null 2>&1 &&
-    pass "ausearch available" ||
-    fail "ausearch not found"
-
-command -v augenrules >/dev/null 2>&1 &&
-    pass "augenrules available" ||
-    fail "augenrules not found"
-
-echo
-echo "==========================================="
+echo "============================================================"
 
 if (( FAIL_COUNT == 0 )); then
     echo "OVERALL RESULT : PASS"
     echo "PASSED CHECKS  : ${PASS_COUNT}"
     echo "FAILED CHECKS  : 0"
-    echo "==========================================="
+    echo "============================================================"
     exit 0
 else
     echo "OVERALL RESULT : FAIL"
     echo "PASSED CHECKS  : ${PASS_COUNT}"
     echo "FAILED CHECKS  : ${FAIL_COUNT}"
-    echo "==========================================="
+    echo "============================================================"
     exit 1
 fi

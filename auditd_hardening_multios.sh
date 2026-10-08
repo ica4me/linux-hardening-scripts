@@ -8,30 +8,57 @@ set -Eeuo pipefail
 # - Debian 12 / 13
 # - RHEL 9 / 10.x
 #
-# This script follows the audit policy reference used for:
-# - time changes
-# - identity changes
-# - system locale / network configuration
-# - MAC policy
-# - login/logout records
-# - session records
-# - permission/ownership changes
-# - denied file access
-# - file deletion/rename
-# - sudoers scope changes
-# - privileged command execution
+# The rule layout follows the reference policy and uses separate files:
+#   50-time-change.rules
+#   50-identity.rules
+#   50-system-locale.rules
+#   50-MAC-policy.rules
+#   50-logins.rules
+#   50-session.rules
+#   50-perm_mod.rules
+#   50-access.rules
+#   50-delete.rules
+#   50-scope.rules
+#   50-actions.rules
 #
-# All generated rules are stored in one generic file:
-# /etc/audit/rules.d/50-linux-hardening.rules
+# On Ubuntu/Debian, MAC policy watches AppArmor.
+# On RHEL, the MAC policy is adapted to SELinux.
+#
+# The script is idempotent:
+# - Managed rule files are overwritten, not appended.
+# - Previous aggregate rule files created by older versions are backed up
+#   and removed to prevent duplicate audit rules.
+# - Runtime rules are cleared before the complete persistent ruleset is loaded,
+#   unless audit is immutable (enabled=2).
 
-RULES_FILE="/etc/audit/rules.d/50-linux-hardening.rules"
-AUDITD_CONF="/etc/audit/auditd.conf"
-
+RULES_DIR="/etc/audit/rules.d"
 BACKUP_ROOT="/var/backups/auditd-hardening"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
 
+UID_MIN="1000"
+
+MANAGED_FILES=(
+    "50-time-change.rules"
+    "50-identity.rules"
+    "50-system-locale.rules"
+    "50-MAC-policy.rules"
+    "50-logins.rules"
+    "50-session.rules"
+    "50-perm_mod.rules"
+    "50-access.rules"
+    "50-delete.rules"
+    "50-scope.rules"
+    "50-actions.rules"
+)
+
+OLD_AGGREGATE_FILES=(
+    "50-linux-hardening.rules"
+    "50-dbalance-hardening.rules"
+)
+
 log()  { echo "[INFO] $*"; }
+warn() { echo "[WARN] $*" >&2; }
 fail() { echo "[ERROR] $*" >&2; exit 1; }
 
 [[ "${EUID}" -eq 0 ]] || fail "Run this script as root."
@@ -68,36 +95,7 @@ case "${OS_ID}" in
         ;;
 esac
 
-log "Detected OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
-log "=== Applying Auditd Hardening ==="
-
-if [[ "${FAMILY}" == "debian" ]]; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq auditd audispd-plugins
-else
-    dnf install -y -q audit audispd-plugins
-fi
-
-command -v auditctl >/dev/null 2>&1 || fail "auditctl not found."
-command -v augenrules >/dev/null 2>&1 || fail "augenrules not found."
-
-mkdir -p /etc/audit/rules.d
-mkdir -p "${BACKUP_DIR}"
-
-[[ -f "${RULES_FILE}" ]] &&
-    cp -a "${RULES_FILE}" "${BACKUP_DIR}/50-linux-hardening.rules"
-
-[[ -f "${AUDITD_CONF}" ]] &&
-    cp -a "${AUDITD_CONF}" "${BACKUP_DIR}/auditd.conf"
-
-log "Backup created: ${BACKUP_DIR}"
-
-UID_MIN="$(awk '$1=="UID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null)"
-UID_MIN="${UID_MIN:-1000}"
-
 ARCH="$(uname -m)"
-
 case "${ARCH}" in
     x86_64|amd64)
         HAS_B32=1
@@ -110,255 +108,285 @@ case "${ARCH}" in
         ;;
 esac
 
-: > "${RULES_FILE}"
+log "Detected OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}"
+log "Architecture: ${ARCH}"
+log "=== Applying Auditd Hardening ==="
 
-cat >> "${RULES_FILE}" <<EOF
-# Linux cross-platform audit rules
-# OS: ${PRETTY_NAME:-${OS_ID} ${OS_VER}}
-# UID_MIN: ${UID_MIN}
+# Install audit framework.
+if [[ "${FAMILY}" == "debian" ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq auditd audispd-plugins
+else
+    dnf install -y -q audit audispd-plugins
+fi
 
-EOF
+command -v auditctl >/dev/null 2>&1 || fail "auditctl not found."
+command -v augenrules >/dev/null 2>&1 || fail "augenrules not found."
 
-add_watch() {
+mkdir -p "${RULES_DIR}" "${BACKUP_DIR}"
+
+backup_file() {
     local path="$1"
-    local perms="$2"
-    local key="$3"
-
     if [[ -e "${path}" ]]; then
-        printf -- '-w %s -p %s -k %s\n' \
-            "${path}" "${perms}" "${key}" >> "${RULES_FILE}"
+        cp -a "${path}" "${BACKUP_DIR}/$(basename "${path}")"
     fi
 }
 
-add_syscall_rule() {
-    local arch="$1"
-    local syscalls="$2"
-    local filters="$3"
-    local key="$4"
+# Backup managed rule files.
+for file in "${MANAGED_FILES[@]}"; do
+    backup_file "${RULES_DIR}/${file}"
+done
 
-    printf -- '-a always,exit -F arch=%s -S %s %s -k %s\n' \
-        "${arch}" "${syscalls}" "${filters}" "${key}" >> "${RULES_FILE}"
-}
+# Backup and remove aggregate files from older script versions.
+for file in "${OLD_AGGREGATE_FILES[@]}"; do
+    if [[ -e "${RULES_DIR}/${file}" ]]; then
+        backup_file "${RULES_DIR}/${file}"
+        rm -f "${RULES_DIR}/${file}"
+        log "Removed legacy aggregate rules file: ${RULES_DIR}/${file}"
+    fi
+done
 
-# ============================================================
-# Time changes
-# Reference behavior:
-# b64: adjtimex, settimeofday, clock_settime
-# b32: adjtimex, settimeofday, stime, clock_settime
-# ============================================================
+backup_file "/etc/audit/audit.rules"
+backup_file "/etc/audit/auditd.conf"
 
-add_syscall_rule "b64" \
-    "adjtimex,settimeofday" \
-    "" \
-    "time-change"
+log "Backup created: ${BACKUP_DIR}"
 
-add_syscall_rule "b64" \
-    "clock_settime" \
-    "" \
-    "time-change"
+# Ensure paths referenced by the requested policy are available where appropriate.
+# Empty files are created only for legacy audit targets that may not exist yet.
+if [[ ! -e /etc/security/opasswd ]]; then
+    install -o root -g root -m 0600 /dev/null /etc/security/opasswd
+fi
+
+if [[ ! -e /var/log/tallylog ]]; then
+    install -o root -g root -m 0600 /dev/null /var/log/tallylog
+fi
+
+# ---------------------------------------------------------------------------
+# 50-time-change.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-time-change.rules" <<'EOF'
+-a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
+EOF
 
 if (( HAS_B32 == 1 )); then
-    add_syscall_rule "b32" \
-        "adjtimex,settimeofday,stime" \
-        "" \
-        "time-change"
-
-    add_syscall_rule "b32" \
-        "clock_settime" \
-        "" \
-        "time-change"
+    cat >> "${RULES_DIR}/50-time-change.rules" <<'EOF'
+-a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change
+EOF
 fi
 
-add_watch "/etc/localtime" "wa" "time-change"
-
-# ============================================================
-# Identity changes
-# ============================================================
-
-add_watch "/etc/group" "wa" "identity"
-add_watch "/etc/passwd" "wa" "identity"
-add_watch "/etc/gshadow" "wa" "identity"
-add_watch "/etc/shadow" "wa" "identity"
-add_watch "/etc/security/opasswd" "wa" "identity"
-
-# ============================================================
-# System locale / hostname / network configuration
-# ============================================================
-
-add_syscall_rule "b64" \
-    "sethostname,setdomainname" \
-    "" \
-    "system-locale"
+cat >> "${RULES_DIR}/50-time-change.rules" <<'EOF'
+-a always,exit -F arch=b64 -S clock_settime -k time-change
+EOF
 
 if (( HAS_B32 == 1 )); then
-    add_syscall_rule "b32" \
-        "sethostname,setdomainname" \
-        "" \
-        "system-locale"
+    cat >> "${RULES_DIR}/50-time-change.rules" <<'EOF'
+-a always,exit -F arch=b32 -S clock_settime -k time-change
+EOF
 fi
 
-add_watch "/etc/issue" "wa" "system-locale"
-add_watch "/etc/issue.net" "wa" "system-locale"
-add_watch "/etc/hosts" "wa" "system-locale"
+cat >> "${RULES_DIR}/50-time-change.rules" <<'EOF'
+-w /etc/localtime -p wa -k time-change
+EOF
 
-if [[ "${FAMILY}" == "debian" ]]; then
-    add_watch "/etc/network" "wa" "system-locale"
-    add_watch "/etc/netplan" "wa" "system-locale"
-else
-    add_watch "/etc/NetworkManager" "wa" "system-locale"
-    add_watch "/etc/sysconfig/network-scripts" "wa" "system-locale"
+# ---------------------------------------------------------------------------
+# 50-identity.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-identity.rules" <<'EOF'
+-w /etc/group -p wa -k identity
+-w /etc/passwd -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+EOF
+
+# ---------------------------------------------------------------------------
+# 50-system-locale.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-system-locale.rules" <<'EOF'
+-a always,exit -F arch=b64 -S sethostname -S setdomainname -k system-locale
+EOF
+
+if (( HAS_B32 == 1 )); then
+    cat >> "${RULES_DIR}/50-system-locale.rules" <<'EOF'
+-a always,exit -F arch=b32 -S sethostname -S setdomainname -k system-locale
+EOF
 fi
 
-# ============================================================
-# Mandatory Access Control policy
-# ============================================================
+cat >> "${RULES_DIR}/50-system-locale.rules" <<'EOF'
+-w /etc/issue -p wa -k system-locale
+-w /etc/issue.net -p wa -k system-locale
+-w /etc/hosts -p wa -k system-locale
+EOF
 
+if [[ -e /etc/network ]]; then
+    echo '-w /etc/network -p wa -k system-locale' >> "${RULES_DIR}/50-system-locale.rules"
+fi
+
+# ---------------------------------------------------------------------------
+# 50-MAC-policy.rules
+# ---------------------------------------------------------------------------
 if [[ "${MAC_TYPE}" == "apparmor" ]]; then
-    add_watch "/etc/apparmor" "wa" "MAC-policy"
-    add_watch "/etc/apparmor.d" "wa" "MAC-policy"
+    cat > "${RULES_DIR}/50-MAC-policy.rules" <<'EOF'
+-w /etc/apparmor/ -p wa -k MAC-policy
+-w /etc/apparmor.d/ -p wa -k MAC-policy
+EOF
 else
-    add_watch "/etc/selinux" "wa" "MAC-policy"
+    cat > "${RULES_DIR}/50-MAC-policy.rules" <<'EOF'
+-w /etc/selinux/ -p wa -k MAC-policy
+EOF
 fi
 
-# ============================================================
-# Login / logout records
-# ============================================================
+# ---------------------------------------------------------------------------
+# 50-logins.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-logins.rules" <<'EOF'
+-w /var/log/faillog -p wa -k logins
+-w /var/log/lastlog -p wa -k logins
+-w /var/log/tallylog -p wa -k logins
+EOF
 
-add_watch "/var/log/faillog" "wa" "logins"
-add_watch "/var/log/lastlog" "wa" "logins"
-add_watch "/var/log/tallylog" "wa" "logins"
+# ---------------------------------------------------------------------------
+# 50-session.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-session.rules" <<'EOF'
+-w /var/run/utmp -p wa -k session
+-w /var/log/wtmp -p wa -k logins
+-w /var/log/btmp -p wa -k logins
+EOF
 
-# ============================================================
-# Session records
-# ============================================================
-
-add_watch "/var/run/utmp" "wa" "session"
-
-# On many modern systems /var/run is a symlink to /run.
-# Add /run/utmp as well if it exists separately.
-if [[ -e /run/utmp ]]; then
-    add_watch "/run/utmp" "wa" "session"
-fi
-
-add_watch "/var/log/wtmp" "wa" "logins"
-add_watch "/var/log/btmp" "wa" "logins"
-
-# ============================================================
-# Permission / ownership changes
-# ============================================================
-
-FILTER="-F auid>=${UID_MIN} -F auid!=4294967295"
-
-add_syscall_rule "b64" \
-    "chmod,fchmod,fchmodat" \
-    "${FILTER}" \
-    "perm_mod"
-
-add_syscall_rule "b64" \
-    "chown,fchown,fchownat,lchown" \
-    "${FILTER}" \
-    "perm_mod"
-
-add_syscall_rule "b64" \
-    "setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr" \
-    "${FILTER}" \
-    "perm_mod"
+# ---------------------------------------------------------------------------
+# 50-perm_mod.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-perm_mod.rules" <<EOF
+-a always,exit -F arch=b64 -S chmod -S fchmod -S fchmodat -F auid>=${UID_MIN} -F auid!=4294967295 -k perm_mod
+EOF
 
 if (( HAS_B32 == 1 )); then
-    add_syscall_rule "b32" \
-        "chmod,fchmod,fchmodat" \
-        "${FILTER}" \
-        "perm_mod"
-
-    add_syscall_rule "b32" \
-        "chown,fchown,fchownat,lchown" \
-        "${FILTER}" \
-        "perm_mod"
-
-    add_syscall_rule "b32" \
-        "setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr" \
-        "${FILTER}" \
-        "perm_mod"
+    cat >> "${RULES_DIR}/50-perm_mod.rules" <<EOF
+-a always,exit -F arch=b32 -S chmod -S fchmod -S fchmodat -F auid>=${UID_MIN} -F auid!=4294967295 -k perm_mod
+EOF
 fi
 
-# ============================================================
-# Unauthorized file access
-# ============================================================
-
-add_syscall_rule "b64" \
-    "creat,open,openat,truncate,ftruncate" \
-    "-F exit=-EACCES ${FILTER}" \
-    "access"
-
-add_syscall_rule "b64" \
-    "creat,open,openat,truncate,ftruncate" \
-    "-F exit=-EPERM ${FILTER}" \
-    "access"
+cat >> "${RULES_DIR}/50-perm_mod.rules" <<EOF
+-a always,exit -F arch=b64 -S chown -S fchown -S fchownat -S lchown -F auid>=${UID_MIN} -F auid!=4294967295 -k perm_mod
+EOF
 
 if (( HAS_B32 == 1 )); then
-    add_syscall_rule "b32" \
-        "creat,open,openat,truncate,ftruncate" \
-        "-F exit=-EACCES ${FILTER}" \
-        "access"
-
-    add_syscall_rule "b32" \
-        "creat,open,openat,truncate,ftruncate" \
-        "-F exit=-EPERM ${FILTER}" \
-        "access"
+    cat >> "${RULES_DIR}/50-perm_mod.rules" <<EOF
+-a always,exit -F arch=b32 -S chown -S fchown -S fchownat -S lchown -F auid>=${UID_MIN} -F auid!=4294967295 -k perm_mod
+EOF
 fi
 
-# ============================================================
-# File deletion and rename
-# ============================================================
-
-add_syscall_rule "b64" \
-    "unlink,unlinkat,rename,renameat" \
-    "${FILTER}" \
-    "delete"
+cat >> "${RULES_DIR}/50-perm_mod.rules" <<EOF
+-a always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -S removexattr -S lremovexattr -S fremovexattr -F auid>=${UID_MIN} -F auid!=4294967295 -k perm_mod
+EOF
 
 if (( HAS_B32 == 1 )); then
-    add_syscall_rule "b32" \
-        "unlink,unlinkat,rename,renameat" \
-        "${FILTER}" \
-        "delete"
+    cat >> "${RULES_DIR}/50-perm_mod.rules" <<EOF
+-a always,exit -F arch=b32 -S setxattr -S lsetxattr -S fsetxattr -S removexattr -S lremovexattr -S fremovexattr -F auid>=${UID_MIN} -F auid!=4294967295 -k perm_mod
+EOF
 fi
 
-# ============================================================
-# System administration scope changes
-# ============================================================
-
-add_watch "/etc/sudoers" "wa" "scope"
-add_watch "/etc/sudoers.d" "wa" "scope"
-
-# ============================================================
-# Privileged commands / sudo actions
-# ============================================================
-
-printf -- '-a always,exit -F arch=b64 -C euid!=uid -F euid=0 -F auid>=%s -F auid!=4294967295 -S execve -k actions\n' \
-    "${UID_MIN}" >> "${RULES_FILE}"
+# ---------------------------------------------------------------------------
+# 50-access.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-access.rules" <<EOF
+-a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EACCES -F auid>=${UID_MIN} -F auid!=4294967295 -k access
+EOF
 
 if (( HAS_B32 == 1 )); then
-    printf -- '-a always,exit -F arch=b32 -C euid!=uid -F euid=0 -F auid>=%s -F auid!=4294967295 -S execve -k actions\n' \
-        "${UID_MIN}" >> "${RULES_FILE}"
+    cat >> "${RULES_DIR}/50-access.rules" <<EOF
+-a always,exit -F arch=b32 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EACCES -F auid>=${UID_MIN} -F auid!=4294967295 -k access
+EOF
 fi
 
-# Secure rules file.
-chown root:root "${RULES_FILE}"
-chmod 0640 "${RULES_FILE}"
+cat >> "${RULES_DIR}/50-access.rules" <<EOF
+-a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EPERM -F auid>=${UID_MIN} -F auid!=4294967295 -k access
+EOF
 
-# Validate and load rules.
+if (( HAS_B32 == 1 )); then
+    cat >> "${RULES_DIR}/50-access.rules" <<EOF
+-a always,exit -F arch=b32 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EPERM -F auid>=${UID_MIN} -F auid!=4294967295 -k access
+EOF
+fi
+
+# ---------------------------------------------------------------------------
+# 50-delete.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-delete.rules" <<EOF
+-a always,exit -F arch=b64 -S unlink -S unlinkat -S rename -S renameat -F auid>=${UID_MIN} -F auid!=4294967295 -k delete
+EOF
+
+if (( HAS_B32 == 1 )); then
+    cat >> "${RULES_DIR}/50-delete.rules" <<EOF
+-a always,exit -F arch=b32 -S unlink -S unlinkat -S rename -S renameat -F auid>=${UID_MIN} -F auid!=4294967295 -k delete
+EOF
+fi
+
+# ---------------------------------------------------------------------------
+# 50-scope.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-scope.rules" <<'EOF'
+-w /etc/sudoers -p wa -k scope
+-w /etc/sudoers.d/ -p wa -k scope
+EOF
+
+# ---------------------------------------------------------------------------
+# 50-actions.rules
+# ---------------------------------------------------------------------------
+cat > "${RULES_DIR}/50-actions.rules" <<EOF
+-a always,exit -F arch=b64 -C euid!=uid -F euid=0 -F auid>=${UID_MIN} -F auid!=4294967295 -S execve -k actions
+EOF
+
+if (( HAS_B32 == 1 )); then
+    cat >> "${RULES_DIR}/50-actions.rules" <<EOF
+-a always,exit -F arch=b32 -C euid!=uid -F euid=0 -F auid>=${UID_MIN} -F auid!=4294967295 -S execve -k actions
+EOF
+fi
+
+# Secure all managed rule files.
+for file in "${MANAGED_FILES[@]}"; do
+    chown root:root "${RULES_DIR}/${file}"
+    chmod 0640 "${RULES_DIR}/${file}"
+done
+
+# Compile persistent rules.
 augenrules --check >/dev/null ||
-    fail "Audit rule validation failed."
+    fail "Audit rule compilation check failed."
 
-augenrules --load >/dev/null ||
-    fail "Failed to load audit rules."
-
+# Ensure auditd is enabled/running.
 systemctl enable auditd >/dev/null 2>&1 || true
-systemctl start auditd
+systemctl start auditd >/dev/null 2>&1 || true
 
 systemctl is-active --quiet auditd ||
-    fail "auditd is not active."
+    fail "auditd service is not active."
+
+# Apply the complete persistent ruleset idempotently.
+AUDIT_ENABLED="$(auditctl -s 2>/dev/null | awk '$1=="enabled"{print $2; exit}')"
+
+if [[ "${AUDIT_ENABLED}" == "2" ]]; then
+    warn "Audit rules are immutable (enabled=2)."
+    warn "Persistent files were updated successfully, but runtime rules cannot be changed until reboot."
+    warn "Reboot during a maintenance window, then run the verification script."
+else
+    auditctl -D >/dev/null 2>&1 ||
+        fail "Failed to clear existing runtime audit rules."
+
+    augenrules --load >/dev/null ||
+        fail "Failed to load persistent audit rules."
+fi
+
+# Restart auditd when supported. Some distributions intentionally refuse
+# manual restart of auditd; the rules have already been applied above.
+if ! systemctl restart auditd >/dev/null 2>&1; then
+    if command -v service >/dev/null 2>&1; then
+        service auditd restart >/dev/null 2>&1 || true
+    fi
+fi
+
+systemctl is-active --quiet auditd ||
+    fail "auditd service is not active after configuration."
 
 log "Backup location: ${BACKUP_DIR}"
-log "Rules file: ${RULES_FILE}"
 log "=== Auditd Hardening Applied Successfully ==="
