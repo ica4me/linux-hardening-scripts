@@ -70,6 +70,7 @@ BEGIN {
 # Insert the hardening policy in global context, before the first Match block.
 awk '
 BEGIN { inserted=0 }
+
 function policy() {
     print ""
     print "# BEGIN MANAGED SSH HARDENING - Ubuntu 22.04"
@@ -89,6 +90,7 @@ function policy() {
     print "# END MANAGED SSH HARDENING"
     print ""
 }
+
 {
     if (!inserted && $0 ~ /^[[:space:]]*Match[[:space:]]+/) {
         policy()
@@ -96,6 +98,7 @@ function policy() {
     }
     print
 }
+
 END {
     if (!inserted) policy()
 }
@@ -103,42 +106,84 @@ END {
 
 cat "${TMP}.new" > "${SSHD_CONFIG}"
 
+# Re-apply secure ownership and permissions.
 chown root:root "${SSHD_CONFIG}"
 chmod 600 "${SSHD_CONFIG}"
 
 OWNER="$(stat -c '%U:%G' "${SSHD_CONFIG}")"
 MODE="$(stat -c '%a' "${SSHD_CONFIG}")"
-[[ "${OWNER}" == "root:root" ]] || fail "Ownership validation failed: ${OWNER}"
-[[ "${MODE}" == "600" ]] || fail "Permission validation failed: ${MODE}"
+
+[[ "${OWNER}" == "root:root" ]] ||
+    fail "Ownership validation failed: ${OWNER}"
+
+[[ "${MODE}" == "600" ]] ||
+    fail "Permission validation failed: ${MODE}"
 
 # Validate syntax before reload.
-"${SSHD_BIN}" -t || fail "sshd configuration syntax validation failed. SSH service was NOT reloaded."
+"${SSHD_BIN}" -t ||
+    fail "sshd configuration syntax validation failed. SSH service was NOT reloaded."
 
 EFFECTIVE="$("${SSHD_BIN}" -T 2>/dev/null)"
 
 check_effective() {
     local regex="$1"
     local description="$2"
-    grep -Eq "${regex}" <<< "${EFFECTIVE}" || fail "Effective ${description} does not match. Check existing /etc/ssh/sshd_config.d/*.conf."
+
+    grep -Eq "${regex}" <<< "${EFFECTIVE}" ||
+        fail "Effective ${description} does not match. Check existing /etc/ssh/sshd_config.d/*.conf."
+
     log "Effective ${description}: OK"
 }
 
-check_effective '^ciphers aes128-ctr,aes192-ctr,aes256-ctr$' "Ciphers"
-check_effective '^macs hmac-sha2-512-etm@openssh\.com,hmac-sha2-256-etm@openssh\.com,hmac-sha2-512,hmac-sha2-256$' "MACs"
-check_effective '^kexalgorithms curve25519-sha256@libssh\.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256$' "KexAlgorithms"
-check_effective '^loglevel verbose$' "LogLevel"
-check_effective '^logingracetime 60$' "LoginGraceTime"
-check_effective '^permitrootlogin (prohibit-password|without-password)$' "PermitRootLogin"
-check_effective '^maxauthtries 4$' "MaxAuthTries"
-check_effective '^permitemptypasswords no$' "PermitEmptyPasswords"
-check_effective '^allowtcpforwarding no$' "AllowTcpForwarding"
-check_effective '^x11forwarding no$' "X11Forwarding"
-check_effective '^clientaliveinterval 300$' "ClientAliveInterval"
-check_effective '^clientalivecountmax 3$' "ClientAliveCountMax"
-check_effective '^maxstartups 10:30:60$' "MaxStartups"
+check_effective '^ciphers aes128-ctr,aes192-ctr,aes256-ctr$' \
+    "Ciphers"
 
-systemctl reload ssh || fail "Failed to reload ssh service."
-systemctl is-active --quiet ssh || fail "ssh service is not active after reload."
+check_effective '^macs hmac-sha2-512-etm@openssh\.com,hmac-sha2-256-etm@openssh\.com,hmac-sha2-512,hmac-sha2-256$' \
+    "MACs"
+
+check_effective '^kexalgorithms curve25519-sha256@libssh\.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256$' \
+    "KexAlgorithms"
+
+# LogLevel can be rendered as VERBOSE/verbose depending on OpenSSH output.
+if grep -Eqi '^loglevel[[:space:]]+verbose$' <<< "${EFFECTIVE}"; then
+    log "Effective LogLevel: OK"
+else
+    fail "Effective LogLevel does not match. Check existing /etc/ssh/sshd_config.d/*.conf."
+fi
+
+check_effective '^logingracetime 60$' \
+    "LoginGraceTime"
+
+check_effective '^permitrootlogin (prohibit-password|without-password)$' \
+    "PermitRootLogin"
+
+check_effective '^maxauthtries 4$' \
+    "MaxAuthTries"
+
+check_effective '^permitemptypasswords no$' \
+    "PermitEmptyPasswords"
+
+check_effective '^allowtcpforwarding no$' \
+    "AllowTcpForwarding"
+
+check_effective '^x11forwarding no$' \
+    "X11Forwarding"
+
+check_effective '^clientaliveinterval 300$' \
+    "ClientAliveInterval"
+
+check_effective '^clientalivecountmax 3$' \
+    "ClientAliveCountMax"
+
+check_effective '^maxstartups 10:30:60$' \
+    "MaxStartups"
+
+# Reload SSH only after all checks pass.
+systemctl reload ssh ||
+    fail "Failed to reload ssh service."
+
+systemctl is-active --quiet ssh ||
+    fail "ssh service is not active after reload."
 
 echo
 echo "============================================================"
